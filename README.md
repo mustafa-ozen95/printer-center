@@ -7,7 +7,7 @@ The interface is available in Turkish and English (operating system language by 
 selectable in Settings).
 
 *Türkçe özet:* Linux için ağ tarayıcısı ve yazıcı yönetim aracı. Camdan ve panelden
-tarama, yazdırma kuyruğu, cihaz/toner/arıza durumu, günlük ve otomatik güncelleme.
+tarama ve yazdırma kuyruğu (aynı ekranda), cihaz/toner/arıza durumu, günlük ve otomatik güncelleme.
 Arayüz Türkçe ve İngilizce; dil sistemden alınır, Ayarlar'dan değiştirilebilir.
 
 ## Features
@@ -15,7 +15,10 @@ Arayüz Türkçe ve İngilizce; dil sistemden alınır, Ayarlar'dan değiştiril
 - **Scan:** multi-page scanning from the glass, preview, rotate and reorder pages, save as PDF/JPEG.
 - **Scan from the device panel:** choosing *Scan → WSD → computer name* on the device
   drops the document into the scan folder and shows a desktop notification (background service).
-- **Print queue:** local CUPS jobs and all jobs on the device; cancel, restart a stopped queue.
+- **Queue:** scans and print jobs on one screen. Scans from the app and from the device panel
+  wait in line (one at a time; up to 5 minutes while another computer is using the scanner) and can
+  be cancelled while waiting. Print jobs: local CUPS jobs and all jobs on the device; cancel,
+  restart a stopped queue.
 - **Device status:** SNMP error bits and alert table, toner (part no., serial, estimated
   days left), maintenance kit life, trays, counters, security checks. New faults raise a
   desktop notification.

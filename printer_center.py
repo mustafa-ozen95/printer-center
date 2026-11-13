@@ -10,11 +10,14 @@ Uses only the Python standard library.
 
 import argparse
 import configparser
+import contextlib
 import datetime as dt
+import fcntl
 import http.server
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import signal
@@ -59,7 +62,7 @@ STATE_PATH = os.path.expanduser("~/.cache/printer-center/state.json")
 LOG_DIR = os.path.expanduser("~/.local/state/printer-center")
 
 # Version: bump this when releasing and push a vX.Y.Z tag with the same name (updater.py compares the two)
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 UPDATE_STATE_PATH = "/var/lib/printer-center/update.json"
 UPDATE_SERVICE = "printer-center-update.service"
 
@@ -207,26 +210,70 @@ def ticket_xml(name, color, dpi, paper):
     ).format(name=escape(name), g=width, y=height, r=color, d=dpi)
 
 
-def do_scan(device, ticket, scan_identifier=None, token=None):
+BUSY_WAIT = 300  # seconds a scan waits in line while the device is busy with another job
+
+
+class ScanCancelled(Exception):
+    pass
+
+
+def _sleep(seconds, cancel):
+    """Sleep; raise ScanCancelled as soon as cancel (threading.Event) is set."""
+    if cancel is not None and cancel.wait(seconds):
+        raise ScanCancelled()
+    if cancel is None:
+        time.sleep(seconds)
+
+
+@contextlib.contextmanager
+def scan_slot(on_wait=None, cancel=None):
+    """Scan queue on this computer: the app and the service take turns (file lock)."""
+    path = os.path.join(os.path.dirname(STATE_PATH), "scan.lock")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        started = time.time()
+        while True:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if on_wait:
+                    on_wait("local", int(time.time() - started))
+                _sleep(1, cancel)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def do_scan(device, ticket, scan_identifier=None, token=None, wait=BUSY_WAIT, on_wait=None, cancel=None):
     """Create a scan job and retrieve the images; return a list of JPEG bytes.
-    scan_identifier/token are only given for scans started from the panel."""
+    scan_identifier/token are only given for scans started from the panel.
+    While the device is busy (e.g. another computer is scanning) the request waits in line for up
+    to `wait` seconds, calling on_wait("device", seconds_waited); `cancel` aborts the wait.
+    on_wait("scanning", ...) is called once the device has accepted the job."""
     extra = ""
     if scan_identifier:
         extra = ("<wscn:ScanIdentifier>%s</wscn:ScanIdentifier>"
               "<wscn:DestinationToken>%s</wscn:DestinationToken>"
               % (escape(scan_identifier), escape(token or "")))
     request = "<wscn:CreateScanJobRequest>%s%s</wscn:CreateScanJobRequest>" % (extra, ticket)
-    last = time.time() + 30
+    started = time.time()
     while True:
+        if cancel is not None and cancel.is_set():
+            raise ScanCancelled()
         try:
             __, raw = soap_send(device, A_CREATE_JOB, request)
             break
         except SoapError as e:
-            # If the device has not finished the previous job, wait a little and retry
-            if time.time() > last or not re.search(r"NotAccepting|Busy|Unavailable", str(e)):
+            if time.time() - started > wait or not re.search(r"NotAccepting|Busy|Unavailable", str(e)):
                 raise
-            log.info("Device busy, waiting: %s", e)
-            time.sleep(3)
+            log.info("Device busy, waiting in line: %s", e)
+            if on_wait:
+                on_wait("device", int(time.time() - started))
+            _sleep(5, cancel)
+    if on_wait:
+        on_wait("scanning", int(time.time() - started))
     root = ET.fromstring(raw)
     job_no, job_token = xml_text(root, "JobId"), xml_text(root, "JobToken")
     log.info("Scan job %s started", job_no)
@@ -252,9 +299,10 @@ def do_scan(device, ticket, scan_identifier=None, token=None):
     return images
 
 
-def pull_scan(device, color="RGB24", dpi=300, paper="A4", name="Linux"):
-    """Scan started from the PC (single page)."""
-    return do_scan(device, ticket_xml(name, color, dpi, paper))[0]
+def pull_scan(device, color="RGB24", dpi=300, paper="A4", name="Linux", on_wait=None, cancel=None):
+    """Scan started from the PC (single page); waits in the scan queue if needed."""
+    with scan_slot(on_wait, cancel):
+        return do_scan(device, ticket_xml(name, color, dpi, paper), on_wait=on_wait, cancel=cancel)[0]
 
 
 # --------------------------------------------------------------------------
@@ -954,26 +1002,64 @@ class Subscription:
 
 
 class PanelScanner:
+    """Scans requested from the device panel are queued and handled one at a time.
+    The queue is published in the state file ("scan_queue") for the app."""
+
     def __init__(self, settings, subscription):
         self.settings = settings
         self.subscription = subscription
-        self.lock = threading.Lock()
+        self.queue = queue.Queue()
+        self.pending = []  # [{"id", "target", "time", "status"}] in order
+        self.pending_lock = threading.Lock()
+        threading.Thread(target=self.worker, daemon=True).start()
 
-    def scan(self, context, scan_identifier):
+    def publish(self):
+        with self.pending_lock:
+            write_state(scan_queue=[dict(i) for i in self.pending])
+
+    def set_status(self, item, status):
+        with self.pending_lock:
+            item["status"] = status
+        self.publish()
+
+    def enqueue(self, context, scan_identifier):
         p = self.settings.profiles.get(context)
         if p is None:
             log.warning("Unknown destination: %r", context)
             return
-        with self.lock:
+        item = {"id": uuid.uuid4().hex[:8], "target": p.name, "time": time.time(), "status": "waiting"}
+        with self.pending_lock:
+            self.pending.append(item)
+            position = len(self.pending)
+        log.info("Scan queued: %s (position %d)", p.name, position)
+        self.publish()
+        self.queue.put((item, p, scan_identifier))
+
+    def worker(self):
+        while True:
+            item, p, scan_identifier = self.queue.get()
             try:
+                self.scan(item, p, scan_identifier)
+            finally:
+                with self.pending_lock:
+                    self.pending = [i for i in self.pending if i["id"] != item["id"]]
+                self.publish()
+
+    def scan(self, item, p, scan_identifier):
+        def on_wait(reason, seconds):
+            status = {"device": "busy", "local": "waiting"}.get(reason, "scanning")
+            if item["status"] != status:
+                self.set_status(item, status)
+        try:
+            with scan_slot(on_wait):
                 ticket = ticket_xml(p.name, p.color, p.dpi, p.paper)
                 images = do_scan(self.settings.device, ticket, scan_identifier,
-                                      self.subscription.tokens.get(p.context, ""))
-                self.save(p, images)
-            except Exception as e:
-                log.exception("Scan failed: %s", e)
-                write_state(error=_("Scan failed: %s") % e)
-                self.notify(_("Scan failed"), str(e)[:200])
+                                 self.subscription.tokens.get(p.context, ""), on_wait=on_wait)
+            self.save(p, images)
+        except Exception as e:
+            log.exception("Scan failed: %s", e)
+            write_state(error=_("Scan failed: %s") % e)
+            self.notify(_("Scan failed"), str(e)[:200])
 
     def save(self, p, images):
         os.makedirs(self.settings.folder, exist_ok=True)
@@ -1026,8 +1112,7 @@ def handler_class(scanner):
                 identity = xml_text(root, "ScanIdentifier", "")
                 log.info("Scan request from panel: destination=%s, source=%s", context,
                          self.client_address[0])
-                threading.Thread(target=scanner.scan, args=(context, identity),
-                                 daemon=True).start()
+                scanner.enqueue(context, identity)
             elif action.endswith("SubscriptionEnd"):
                 log.warning("Device ended the subscription, will register again")
                 scanner.subscription.identity = None

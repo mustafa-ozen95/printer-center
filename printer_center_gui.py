@@ -305,6 +305,12 @@ class ScanPage(Gtk.Box):
         self.scan_btn = icon_button("scanner-symbolic", _("Scan"), "suggested-action", "pc-big")
         self.scan_btn.connect("clicked", self.scan)
         left.pack_start(self.scan_btn, False, False, 0)
+        self.job = None  # scan of this window while it is queued/running (shown on the Queue page)
+        self.cancel_event = None
+        self.cancel_btn = icon_button("process-stop-symbolic", _("Cancel"), "flat")
+        self.cancel_btn.connect("clicked", self.cancel_scan)
+        self.cancel_btn.set_no_show_all(True)
+        left.pack_start(self.cancel_btn, False, False, 0)
 
         status = Gtk.Box(spacing=8, margin_start=4, margin_end=4)
         self.spinner = Gtk.Spinner()
@@ -403,22 +409,55 @@ class ScanPage(Gtk.Box):
         self.spinner.start()
         self.status.set_text(_("Scanning… (about 10–30 seconds)"))
         log.info("Scan started: %s, %d dpi, %s", color, dpi, paper)
+        cancel = self.cancel_event = threading.Event()
+        self.job = {"target": _("Scan from the glass"), "time": time.time(), "status": "scanning", "own": True}
+        self.cancel_btn.show()
+
+        def on_wait(reason, seconds):
+            GLib.idle_add(self.waiting, reason, seconds)
 
         def work():
             started = time.time()
             try:
-                data = core.pull_scan(device, color, dpi, paper, socket.gethostname())
+                data = core.pull_scan(device, color, dpi, paper, socket.gethostname(),
+                                      on_wait=on_wait, cancel=cancel)
                 log.info("Scan done: %d KB, %.1f s", len(data) // 1024, time.time() - started)
                 GLib.idle_add(self.scanned, data, dpi, None)
+            except core.ScanCancelled:
+                log.info("Scan cancelled while waiting in line")
+                GLib.idle_add(self.scanned, None, dpi, "cancelled")
             except Exception as e:
                 log.error("Scan failed (%.1f s): %s", time.time() - started, e, exc_info=True)
                 GLib.idle_add(self.scanned, None, dpi, e)
 
         threading.Thread(target=work, daemon=True).start()
 
+    def waiting(self, reason, seconds):
+        if not self.job:
+            return
+        self.job["status"] = {"device": "busy", "local": "waiting"}.get(reason, "scanning")
+        if reason == "local":
+            self.status.set_text(_("Another scan on this computer is in progress; waiting in line… (%d s)")
+                                 % seconds)
+        elif reason == "device":
+            self.status.set_text(_("The device is busy with another job; waiting in line… (%d s)") % seconds)
+        else:
+            self.status.set_text(_("Scanning… (about 10–30 seconds)"))
+            self.cancel_btn.hide()  # the device is scanning now; it cannot be stopped from here
+
+    def cancel_scan(self, _widget):
+        if self.cancel_event:
+            self.cancel_event.set()
+        self.cancel_btn.hide()
+
     def scanned(self, data, dpi, error):
         self.scan_btn.set_sensitive(True)
         self.spinner.stop()
+        self.job = self.cancel_event = None
+        self.cancel_btn.hide()
+        if error == "cancelled":
+            self.status.set_text(_("Scan cancelled."))
+            return
         if error:
             self.status.set_text(_("Scan failed: %s") % error_text(error))
             self.main_window.warn(_("Scan failed.\n\n%s\n\nCheck that the device is on and not busy "
@@ -1327,6 +1366,8 @@ JOB_ICON = {3: "alarm-symbolic", 4: "media-playback-pause-symbolic",
             5: "document-print-symbolic", 6: "dialog-warning-symbolic",
             7: "process-stop-symbolic", 8: "dialog-error-symbolic", 9: "emblem-ok-symbolic"}
 JOB_LEVEL = {3: "neutral", 4: "warning", 5: "ok", 6: "error", 7: "neutral", 8: "error", 9: "ok"}
+SCAN_STATES = {"waiting": (N_("Waiting"), "neutral"), "busy": (N_("Device busy"), "warning"),
+               "scanning": (N_("Scanning"), "ok")}
 PRINTER_STATES = {3: (N_("Idle"), "ok"), 4: (N_("Printing"), "ok"), 5: (N_("Stopped"), "error")}
 
 
@@ -1337,6 +1378,13 @@ class QueuePage(Gtk.ScrolledWindow):
         self.queue = None  # (name, cups_uri)
         self._running = False
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin=16)
+
+        # Scan queue: this window's scan + scans requested from the device panel (service)
+        self.scans = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
+        self.scan_count = 0
+        inner.pack_start(card(_("Scan queue"), self.scans,
+                              description=_("Scans waiting for the device, from this computer and from "
+                                            "the device panel; one is scanned at a time")), False, False, 0)
 
         # Local queue status
         self.queue_badge = styled(Gtk.Label(label="…"), "pc-badge", "neutral")
@@ -1349,12 +1397,12 @@ class QueuePage(Gtk.ScrolledWindow):
         for p in (self.queue_badge, self.start_btn, self.cancel_all_btn):
             right.pack_start(p, False, False, 0)
         self.local = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
-        self.local_card = card(_("Sent from this computer"), self.local,
+        self.local_card = card(_("Print jobs from this computer"), self.local,
                                description=_("Pending and recently completed print jobs"), right=right)
         inner.pack_start(self.local_card, False, False, 0)
 
         self.device = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
-        self.device_card = card(_("Jobs on the device"), self.device,
+        self.device_card = card(_("Print jobs on the device"), self.device,
                                 description=_("Jobs from all computers on the network that the device "
                                               "is processing now"))
         inner.pack_start(self.device_card, False, False, 0)
@@ -1364,6 +1412,7 @@ class QueuePage(Gtk.ScrolledWindow):
 
     # --- data
     def refresh(self, force=False):
+        self.render_scans()
         if self._running or not (force or self.get_mapped() or not getattr(self, "_first", False)):
             return True
         self._first = True
@@ -1424,7 +1473,85 @@ class QueuePage(Gtk.ScrolledWindow):
         empty = (_("Could not reach the device: %s") % s["device_error"]) if s["device_error"] \
             else _("No pending jobs on the device.")
         self.populate(self.device, s["device"], [], empty, local=False)
-        self.main_window.set_queue_count(len(s["local"]) + len(s["device"]))
+        self.print_count = len(s["local"]) + len(s["device"])
+        self.main_window.set_queue_count(self.print_count + self.scan_count)
+
+    # --- scan queue
+    def render_scans(self):
+        d = core.read_state()
+        jobs = [dict(j) for j in ([self.main_window.scan_page.job] if self.main_window.scan_page.job else [])]
+        if d.get("running", True):  # stale entries of a stopped service are ignored
+            jobs += [dict(j, own=False) for j in d.get("scan_queue") or []]
+        recent = (d.get("recent_scans") or [])[:5]
+        signature = (tuple((j.get("target"), j.get("time"), j.get("status")) for j in jobs)
+                     + tuple(r.get("path") for r in recent))
+        if self.scan_count != len(jobs):
+            self.scan_count = len(jobs)
+            self.main_window.set_queue_count(getattr(self, "print_count", 0) + self.scan_count)
+        if getattr(self.scans, "signature", None) == signature:
+            return
+        self.scans.signature = signature
+        for r in self.scans.get_children():
+            self.scans.remove(r)
+        if not jobs:
+            r = Gtk.ListBoxRow(activatable=False)
+            r.add(make_label(_("No scans waiting."), "pc-dim", margin=12, xalign=0.5))
+            self.scans.add(r)
+        for n, j in enumerate(jobs, 1):
+            self.scans.add(self.scan_row(j, n))
+        if recent:
+            r = Gtk.ListBoxRow(activatable=False)
+            r.add(make_label(_("Recently completed"), "pc-dim", margin_top=12, margin_start=8, margin_bottom=4))
+            self.scans.add(r)
+            for item in recent:
+                self.scans.add(self.recent_scan_row(item))
+        self.scans.show_all()
+
+    def scan_row(self, j, position):
+        r = Gtk.ListBoxRow(activatable=False)
+        k = Gtk.Box(spacing=12, margin=8)
+        k.pack_start(Gtk.Image.new_from_icon_name("scanner-symbolic", Gtk.IconSize.LARGE_TOOLBAR), False, False, 0)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        text.pack_start(make_label(j.get("target") or "", ellipsize=Pango.EllipsizeMode.END), False, False, 0)
+        parts = ["#%d" % position, _("This window") if j.get("own") else _("Device panel")]
+        if j.get("time"):
+            parts.append(dt.datetime.fromtimestamp(j["time"]).strftime(date_format(2)))
+        text.pack_start(make_label(" · ".join(parts), "pc-dim"), False, False, 0)
+        k.pack_start(text, True, True, 0)
+        label, level = SCAN_STATES.get(j.get("status"), SCAN_STATES["waiting"])
+        k.pack_start(styled(Gtk.Label(label=_(label), valign=Gtk.Align.CENTER), "pc-badge", level),
+                     False, False, 0)
+        if j.get("own") and j.get("status") != "scanning":
+            b = styled(Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON),
+                       "flat", "circular")
+            b.set_valign(Gtk.Align.CENTER)
+            b.set_tooltip_text(_("Cancel"))
+            b.connect("clicked", self.main_window.scan_page.cancel_scan)
+            k.pack_start(b, False, False, 0)
+        r.add(k)
+        return r
+
+    def recent_scan_row(self, item):
+        r = Gtk.ListBoxRow(activatable=False)
+        k = Gtk.Box(spacing=12, margin=8)
+        k.pack_start(Gtk.Image.new_from_icon_name("emblem-ok-symbolic", Gtk.IconSize.LARGE_TOOLBAR), False, False, 0)
+        path = item.get("path") or ""
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        text.pack_start(make_label(os.path.basename(path), ellipsize=Pango.EllipsizeMode.MIDDLE), False, False, 0)
+        parts = [x for x in (item.get("target"),) if x]
+        if item.get("time"):
+            parts.append(dt.datetime.fromtimestamp(item["time"]).strftime(date_format(2)))
+        text.pack_start(make_label(" · ".join(parts), "pc-dim"), False, False, 0)
+        k.pack_start(text, True, True, 0)
+        if os.path.exists(path):
+            b = styled(Gtk.Button.new_from_icon_name("document-open-symbolic", Gtk.IconSize.BUTTON),
+                       "flat", "circular")
+            b.set_valign(Gtk.Align.CENTER)
+            b.set_tooltip_text(_("Open"))
+            b.connect("clicked", lambda _b: open_path(path))
+            k.pack_start(b, False, False, 0)
+        r.add(k)
+        return r
 
     def populate(self, items, active, history, empty_label, local):
         signature = tuple((i["id"], i["status"], i.get("page")) for i in active + history) + (empty_label,)
@@ -1611,7 +1738,7 @@ class LogPage(Gtk.Box):
 
 SECTIONS = (("scan", "scanner-symbolic", N_("Scan")),
             ("panel", "send-to-symbolic", N_("Scan from Panel")),
-            ("queue", "view-list-symbolic", N_("Print Queue")),
+            ("queue", "view-list-symbolic", N_("Queue")),
             ("device", "printer-symbolic", N_("Device")),
             ("logs", "utilities-terminal-symbolic", N_("Log")),
             ("settings", "emblem-system-symbolic", N_("Settings")))
@@ -1760,7 +1887,7 @@ class TrayIcon:
         self.menu = Gtk.Menu()
         for label_text, work in ((_("Open Printer Center"), lambda: self.render()),
                                  (_("Scan"), lambda: self.render("scan")),
-                                 (_("Print queue"), lambda: self.render("queue")),
+                                 (_("Queue"), lambda: self.render("queue")),
                                  (_("Device status"), lambda: self.render("device")),
                                  (None, None),
                                  (_("Open scans folder"), self.folder),
