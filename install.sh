@@ -71,6 +71,7 @@ install_files() {
 	if [ -d /etc/polkit-1/rules.d ]; then
 		install -m 0644 "$SRC_DIR/50-printer-center-update.rules" /etc/polkit-1/rules.d/
 	fi
+	configure_updates  # before the timer starts: its first run may be immediate
 	systemctl daemon-reload
 	systemctl enable --now printer-center-update.timer >/dev/null 2>&1 || true
 	echo "Program files installed: version $(sed -n 's/^VERSION = "\(.*\)"/\1/p' "$SRC_DIR/printer_center.py")"
@@ -117,7 +118,6 @@ start_tray() {
 
 if [ -n "$FILES_ONLY" ]; then
 	install_files
-	configure_updates
 	for_user_sessions try-restart
 	exit 0
 fi
@@ -168,5 +168,4 @@ else
 fi
 
 user_shortcuts
-configure_updates
 start_tray
