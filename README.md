@@ -99,3 +99,7 @@ Scans, logs and settings stay on the computer; the app talks only to the printer
 local network and, for updates, reads this repository. The repository contains no device
 address, personal settings, scans or logs (`.gitignore`). Document contents and passwords
 are never logged.
+
+## License
+
+[MIT](LICENSE)
