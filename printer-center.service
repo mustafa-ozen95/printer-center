@@ -1,0 +1,11 @@
+[Unit]
+Description=Printer Center service (scan-to-PC from the device panel, device monitoring)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/printer-center/printer_center.py
+Restart=on-failure
+RestartSec=15
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Printer Center
+Comment=Scan, print queue and device status for network printers
+Comment[tr]=Ağ yazıcısı için tarama, yazdırma kuyruğu ve cihaz durumu
+Exec=/usr/bin/python3 /opt/printer-center/printer_center_gui.py
+Icon=printer
+Terminal=false
+Categories=Office;Graphics;Scanning;Printing;
+Keywords=scan;scanner;printer;print;xerox;
+Keywords[tr]=tara;tarayıcı;yazıcı;yazdır;scan;printer;xerox;
+StartupNotify=true

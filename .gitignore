@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.part
+# Personal settings, scans and logs never go into the repository
+settings.ini
+*.pdf
+*.jpg
+*.jpeg
+*.png
+*.log
+state.json
