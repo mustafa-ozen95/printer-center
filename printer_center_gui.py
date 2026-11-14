@@ -572,6 +572,7 @@ class ScanPage(Gtk.Box):
                                max(1, int(pb.get_height() * ratio)), GdkPixbuf.InterpType.BILINEAR)
 
     def refresh_list(self, select=None):
+        self.dirty = bool(self.pages)  # every page change goes through here; saving clears it
         self.items.clear()
         for i, s in enumerate(self.pages):
             self.items.append([self.thumb(s["pb"]), _("Page %d") % (i + 1), i])
@@ -596,6 +597,8 @@ class ScanPage(Gtk.Box):
                               _("%s, saved as separate files")) % page_count(n) if n else _("No pages yet"))
         if not n and not self.spinner.get_property("active"):
             self.status.set_text(_("Ready."))
+        if hasattr(self.main_window, "scan_page"):
+            self.main_window.restart_if_pending()
 
     def selected(self):
         s = self.icons.get_selected_items()
@@ -751,6 +754,8 @@ class ScanPage(Gtk.Box):
             text += "\n" + (_("1 blank page skipped") if skipped == 1 else _("%d blank pages skipped") % skipped)
         self.status.set_text(text)
         self.main_window.notify_user(_("Saved"), paths[0])
+        self.dirty = False
+        self.main_window.restart_if_pending()
         if self.open_after.get_active():
             open_path(paths[0])
 
@@ -2055,8 +2060,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.scan_page.update_view()
         self.navigate("scan" if self.device() else "settings")
         self.connect("delete-event", self.on_delete)
-        self._seen_version = None
-        GLib.timeout_add_seconds(30, self.check_new_version)
+        # Restart by itself after an update: the installer replacing the program file is reported by
+        # the kernel (inotify), so nothing is polled while waiting.
+        self._restart_pending, self._restart_timer = False, None
+        self._program_monitor = Gio.File.new_for_path(core.__file__).monitor_file(Gio.FileMonitorFlags.NONE, None)
+        self._program_monitor.connect("changed", self.on_program_changed)
 
     def toggle_maximize(self):
         if self.is_maximized():
@@ -2125,20 +2133,31 @@ class MainWindow(Gtk.ApplicationWindow):
         d.destroy()
         return answer == Gtk.ResponseType.YES
 
+    def on_program_changed(self, *_args):
+        # wait until the installer has been quiet for a few seconds (it copies several files)
+        if self._restart_timer:
+            GLib.source_remove(self._restart_timer)
+        self._restart_timer = GLib.timeout_add_seconds(5, self.check_new_version)
+
+    def restart_if_pending(self):
+        """Called when the user finishes something (pages saved or cleared, scan done)."""
+        if getattr(self, "_restart_pending", False):
+            GLib.idle_add(self.check_new_version)
+
     def check_new_version(self):
-        """After an update was installed: restart with the new version by itself, but only when idle
-        (no scan running, no unsaved pages, no open dialog); otherwise try again later."""
+        """A newer version was installed: restart with it, but only when idle (no scan running,
+        no unsaved pages, no open dialog); otherwise when the user is done (restart_if_pending)."""
+        self._restart_timer = None
         on_disk = installed_version()
         if version_tuple(on_disk) <= version_tuple(core.VERSION):
-            return True
-        if self._seen_version != on_disk:  # seen twice in a row: the installer has finished copying
-            self._seen_version = on_disk
-            return True
+            return False
         sp = self.scan_page
-        busy = (sp.job is not None or sp.spinner.get_property("active") or sp.pages
-                or any(w.get_modal() and w.get_visible() for w in Gtk.Window.list_toplevels()))
-        if busy:
-            return True
+        dialog_open = any(w.get_modal() and w.get_visible() for w in Gtk.Window.list_toplevels())
+        if sp.job is not None or sp.spinner.get_property("active") or sp.dirty or dialog_open:
+            self._restart_pending = True
+            if dialog_open and not (sp.job or sp.dirty):  # dialogs have no finished hook: look once more later
+                self._restart_timer = GLib.timeout_add_seconds(60, self.check_new_version)
+            return False
         log.info("Version %s installed, restarting (running %s)", on_disk, core.VERSION)
         # a minimized window comes back in the tray, not popped up on the screen
         self.relaunch(tray=not self.get_visible() or getattr(self, "iconified", False))
