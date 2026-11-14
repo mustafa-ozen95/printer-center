@@ -1850,7 +1850,10 @@ class MainWindow(Gtk.ApplicationWindow):
         box.pack_start(sidebar, False, False, 0)
         box.pack_start(self.stack, True, True, 0)
         self.add(box)
-        box.show_all()  # window not made visible: in tray mode it starts hidden
+        # window itself not made visible (tray mode starts hidden), but the title bar must be:
+        # a hidden header bar leaves the window without title, minimize, maximize and close
+        self.header_bar.show_all()
+        box.show_all()
         self.scan_page.update_view()
         self.navigate("scan" if self.device() else "settings")
         self.connect("delete-event", self.on_delete)
