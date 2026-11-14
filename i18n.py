@@ -416,4 +416,5 @@ TR = {
     '%d blank pages skipped': '%d boş sayfa atlandı',
     'Could not print:\n%s': 'Yazdırılamadı:\n%s',
     'Sent to the printer: %s': 'Yazıcıya gönderildi: %s',
+    'Version %s has been installed. The program restarts with it by itself once no scan is in progress and the scanned pages are saved.': '%s sürümü kuruldu. Süren tarama kalmadığında ve taranan sayfalar kaydedildiğinde program kendiliğinden yeni sürümle yeniden başlar.',
 }

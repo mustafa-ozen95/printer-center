@@ -1465,8 +1465,8 @@ class SettingsPage(Gtk.ScrolledWindow):
         status = d.get("status")
         if newer_installed:
             badge, level = _("Restart needed"), "warning"
-            message = _("Version %s has been installed. Restart the program for the changes "
-                        "to take effect.") % on_disk
+            message = _("Version %s has been installed. The program restarts with it by itself "
+                        "once no scan is in progress and the scanned pages are saved.") % on_disk
         elif status == "error":
             badge, level, message = _("Error"), "error", _("Last check failed: %s") % d.get("error", "")
         elif status == "not_configured" or (not d and not os.path.exists("/etc/printer-center")):
@@ -1493,14 +1493,6 @@ class SettingsPage(Gtk.ScrolledWindow):
         self.upd_message.set_text(message)
         self.upd_restart_btn.set_visible(newer_installed)
         self.upd_install_btn.set_visible(status == "update_available" and not newer_installed)
-        if newer_installed and not self.main_window.is_visible():
-            # Running only in the tray: switch to the new version without disturbing anyone
-            GLib.idle_add(lambda: self.main_window.relaunch(tray=True))
-            return False
-        if newer_installed and not getattr(self, "_update_notified", False):
-            self._update_notified = True
-            self.main_window.notify_user(_("Printer Center updated"),
-                                         _("Version %s has been installed. Restart the program.") % on_disk)
         return False
 
     def check_for_updates(self, _widget, unit=core.UPDATE_SERVICE):
@@ -2063,6 +2055,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self.scan_page.update_view()
         self.navigate("scan" if self.device() else "settings")
         self.connect("delete-event", self.on_delete)
+        self._seen_version = None
+        GLib.timeout_add_seconds(30, self.check_new_version)
 
     def toggle_maximize(self):
         if self.is_maximized():
@@ -2129,6 +2123,24 @@ class MainWindow(Gtk.ApplicationWindow):
         answer = d.run()
         d.destroy()
         return answer == Gtk.ResponseType.YES
+
+    def check_new_version(self):
+        """After an update was installed: restart with the new version by itself, but only when idle
+        (no scan running, no unsaved pages, no open dialog); otherwise try again later."""
+        on_disk = installed_version()
+        if version_tuple(on_disk) <= version_tuple(core.VERSION):
+            return True
+        if self._seen_version != on_disk:  # seen twice in a row: the installer has finished copying
+            self._seen_version = on_disk
+            return True
+        sp = self.scan_page
+        busy = (sp.job is not None or sp.spinner.get_property("active") or sp.pages
+                or any(w.get_modal() and w.get_visible() for w in Gtk.Window.list_toplevels()))
+        if busy:
+            return True
+        log.info("Version %s installed, restarting (running %s)", on_disk, core.VERSION)
+        self.relaunch(tray=not self.get_visible())
+        return False
 
     def relaunch(self, tray=False):
         log.info("Restarting the application")
