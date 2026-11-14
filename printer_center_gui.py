@@ -2065,6 +2065,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.maximize()
 
     def on_window_state(self, _w, event):
+        self.iconified = bool(event.new_window_state & Gdk.WindowState.ICONIFIED)
         maximized = bool(event.new_window_state & Gdk.WindowState.MAXIMIZED)
         self.max_image.set_from_icon_name("window-restore-symbolic" if maximized else "window-maximize-symbolic",
                                           Gtk.IconSize.MENU)
@@ -2139,7 +2140,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if busy:
             return True
         log.info("Version %s installed, restarting (running %s)", on_disk, core.VERSION)
-        self.relaunch(tray=not self.get_visible())
+        # a minimized window comes back in the tray, not popped up on the screen
+        self.relaunch(tray=not self.get_visible() or getattr(self, "iconified", False))
         return False
 
     def relaunch(self, tray=False):
