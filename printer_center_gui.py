@@ -78,6 +78,15 @@ levelbar.pc-toner block { min-height: 10px; border-radius: 5px; }
 .pc-log text { background-color: @theme_base_color; }
 .pc-counter { border-radius: 99px; padding: 0 7px; font-size: 8pt; font-weight: bold;
             background-color: @theme_selected_bg_color; color: @theme_selected_fg_color; }
+.pc-winbtn { min-width: 26px; min-height: 26px; padding: 0; margin: 0 1px;
+             border-radius: 99px; border: none; box-shadow: none; background: none;
+             color: alpha(@theme_fg_color, 0.55); transition: all 120ms ease-out; }
+.pc-winbtn image { -gtk-icon-transform: scale(0.85); }
+.pc-winbtn:hover { background-color: alpha(@theme_fg_color, 0.09); color: @theme_fg_color; }
+.pc-winbtn:active { background-color: alpha(@theme_fg_color, 0.16); }
+.pc-winbtn.close:hover { background-color: #e01b24; color: #ffffff; }
+.pc-winbtn.close:active { background-color: #c01c28; color: #ffffff; }
+.pc-winbtns { margin-left: 6px; }
 """
 
 
@@ -1793,8 +1802,24 @@ class MainWindow(Gtk.ApplicationWindow):
         self.set_default_size(1040, 680)
         self.set_icon_name("scanner")
 
-        self.header_bar = Gtk.HeaderBar(show_close_button=True, title=_("Printer Center"))
+        # own light window buttons instead of the theme's title buttons
+        self.header_bar = Gtk.HeaderBar(show_close_button=False, title=_("Printer Center"))
         self.set_titlebar(self.header_bar)
+        buttons = styled(Gtk.Box(spacing=2, valign=Gtk.Align.CENTER), "pc-winbtns")
+        self.max_image = Gtk.Image.new_from_icon_name("window-maximize-symbolic", Gtk.IconSize.MENU)
+        for icon, tip, action, extra in (
+                ("window-minimize-symbolic", _("Minimize"), lambda _b: self.iconify(), None),
+                (self.max_image, _("Maximize"), lambda _b: self.toggle_maximize(), "maximize"),
+                ("window-close-symbolic", _("Close"), lambda _b: self.close(), "close")):
+            b = Gtk.Button(relief=Gtk.ReliefStyle.NONE, can_focus=False, tooltip_text=tip)
+            b.add(icon if isinstance(icon, Gtk.Image) else Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.MENU))
+            styled(b, "pc-winbtn", *([extra] if extra else []))
+            b.connect("clicked", action)
+            buttons.pack_start(b, False, False, 0)
+            if extra == "maximize":
+                self.max_button = b
+        self.header_bar.pack_end(buttons)
+        self.connect("window-state-event", self.on_window_state)
 
         self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE,
                                transition_duration=150)
@@ -1857,6 +1882,19 @@ class MainWindow(Gtk.ApplicationWindow):
         self.scan_page.update_view()
         self.navigate("scan" if self.device() else "settings")
         self.connect("delete-event", self.on_delete)
+
+    def toggle_maximize(self):
+        if self.is_maximized():
+            self.unmaximize()
+        else:
+            self.maximize()
+
+    def on_window_state(self, _w, event):
+        maximized = bool(event.new_window_state & Gdk.WindowState.MAXIMIZED)
+        self.max_image.set_from_icon_name("window-restore-symbolic" if maximized else "window-maximize-symbolic",
+                                          Gtk.IconSize.MENU)
+        self.max_button.set_tooltip_text(_("Restore") if maximized else _("Maximize"))
+        return False
 
     def on_delete(self, *_args):
         app = self.get_application()

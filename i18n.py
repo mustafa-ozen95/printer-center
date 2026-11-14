@@ -392,4 +392,8 @@ TR = {
     '≈ %s · lasts %s': '≈ %s · %s yeter',
     '✓ Connected: %s (%s)': '✓ Bağlandı: %s (%s)',
     '✗ Could not connect: %s': '✗ Ulaşılamadı: %s',
+    'Minimize': 'Küçült',
+    'Maximize': 'Büyüt',
+    'Restore': 'Önceki boyut',
+    'Close': 'Kapat',
 }

@@ -62,7 +62,7 @@ STATE_PATH = os.path.expanduser("~/.cache/printer-center/state.json")
 LOG_DIR = os.path.expanduser("~/.local/state/printer-center")
 
 # Version: bump this when releasing and push a vX.Y.Z tag with the same name (updater.py compares the two)
-VERSION = "2.2.1"
+VERSION = "2.2.2"
 UPDATE_STATE_PATH = "/var/lib/printer-center/update.json"
 UPDATE_SERVICE = "printer-center-update.service"
 INSTALL_SERVICE = "printer-center-install.service"
