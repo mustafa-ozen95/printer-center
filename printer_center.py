@@ -62,7 +62,7 @@ STATE_PATH = os.path.expanduser("~/.cache/printer-center/state.json")
 LOG_DIR = os.path.expanduser("~/.local/state/printer-center")
 
 # Version: bump this when releasing and push a vX.Y.Z tag with the same name (updater.py compares the two)
-VERSION = "2.2.2"
+VERSION = "2.3.0"
 UPDATE_STATE_PATH = "/var/lib/printer-center/update.json"
 UPDATE_SERVICE = "printer-center-update.service"
 INSTALL_SERVICE = "printer-center-install.service"
@@ -350,7 +350,12 @@ def jpeg_info(data):
     raise ValueError(_("Could not read the JPEG size"))
 
 
-def jpegs_to_pdf(jpegs, dpi):
+def pdf_text(text):
+    """PDF text string (UTF-16BE with byte order mark, hex)."""
+    return b"<FEFF" + text.encode("utf-16-be").hex().upper().encode() + b">"
+
+
+def jpegs_to_pdf(jpegs, dpi, title=None):
     objects = []
 
     def append_block(b):
@@ -374,6 +379,11 @@ def jpegs_to_pdf(jpegs, dpi):
             b"/Resources << /XObject << /Im0 %d 0 R >> >> /Contents %d 0 R >>"
             % (pages, w_pt, y_pt, image, content)))
     objects[catalog - 1] = b"<< /Type /Catalog /Pages %d 0 R >>" % pages
+    now = dt.datetime.now().astimezone()
+    offset = now.strftime("%z") or "+0000"
+    info = append_block(b"<< /Producer %s /CreationDate (D:%s%s'%s')%s >>" % (
+        pdf_text("Printer Center " + VERSION), now.strftime("%Y%m%d%H%M%S").encode(),
+        offset[:3].encode(), offset[3:].encode(), b" /Title " + pdf_text(title) if title else b""))
     objects[pages - 1] = (b"<< /Type /Pages /Kids [%s] /Count %d >>"
                               % (b" ".join(b"%d 0 R" % n for n in page_no), len(page_no)))
     output = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
@@ -385,8 +395,8 @@ def jpegs_to_pdf(jpegs, dpi):
     output += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objects) + 1)
     for k in offsets:
         output += b"%010d 00000 n \n" % k
-    output += (b"trailer\n<< /Size %d /Root %d 0 R >>\nstartxref\n%d\n%%%%EOF\n"
-              % (len(objects) + 1, catalog, xref))
+    output += (b"trailer\n<< /Size %d /Root %d 0 R /Info %d 0 R >>\nstartxref\n%d\n%%%%EOF\n"
+              % (len(objects) + 1, catalog, info, xref))
     return bytes(output)
 
 

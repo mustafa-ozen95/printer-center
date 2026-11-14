@@ -12,7 +12,11 @@ Arayüz Türkçe ve İngilizce; dil sistemden alınır, Ayarlar'dan değiştiril
 
 ## Features
 
-- **Scan:** multi-page scanning from the glass, preview, rotate and reorder pages, save as PDF/JPEG.
+- **Scan:** multi-page scanning from the glass, preview, rotate and reorder pages.
+- **Document options:** PDF (single file or one per page), JPEG, PNG or TIFF; quality presets from
+  original to small e-mail size; file name (date and time added); skip blank pages; open after
+  saving; one-click save to the scan folder or *Save as…*; print the scanned pages through the
+  system print dialog (copier). PDFs carry title, date and producer metadata.
 - **Scan from the device panel:** choosing *Scan → WSD → computer name* on the device
   drops the document into the scan folder and shows a desktop notification (background service).
 - **Queue:** scans and print jobs on one screen. Scans from the app and from the device panel

@@ -36,6 +36,13 @@ APP_ID = "io.github.mustafa_ozen95.PrinterCenter"
 SERVICE = "printer-center.service"
 COLOR_CHOICES = [(N_("Color"), "color"), (N_("Gray"), "gray")]
 FORMATS = [("PDF", "pdf"), ("JPEG", "jpg")]
+# Document card: (label, id, extension, one file per page)
+DOC_FORMATS = [("PDF", "pdf", ".pdf", False), (N_("PDF, one file per page"), "pdfs", ".pdf", True),
+               ("JPEG", "jpg", ".jpg", True), ("PNG", "png", ".png", True), ("TIFF", "tif", ".tif", True)]
+# quality id -> (JPEG quality, highest resolution); "original" keeps the scanner's image
+DOC_QUALITIES = [(N_("Original"), "original"), (N_("High"), "high"),
+                 (N_("Medium (smaller file)"), "medium"), (N_("Small (for e-mail)"), "small")]
+QUALITY = {"high": (90, None), "medium": (75, 200), "small": (60, 150)}
 EMPTY_HINT = N_("Place the document face down on the glass and press Scan.")
 # strftime formats per language: (date, date + time, short date + time)
 DATE_FORMATS = {"tr": ("%d.%m.%Y", "%d.%m.%Y %H:%M", "%d.%m %H:%M"),
@@ -76,6 +83,7 @@ CSS = b"""
 levelbar.pc-toner block { min-height: 10px; border-radius: 5px; }
 .pc-recent row, .pc-job row { border-radius: 8px; }
 .pc-log text { background-color: @theme_base_color; }
+.pc-plain { background-color: transparent; }
 .pc-counter { border-radius: 99px; padding: 0 7px; font-size: 8pt; font-weight: bold;
             background-color: @theme_selected_bg_color; color: @theme_selected_fg_color; }
 .pc-winbtn { min-width: 26px; min-height: 26px; padding: 0; margin: 0 1px;
@@ -267,9 +275,48 @@ def jpeg_pixbuf(data):
     return loader.get_pixbuf()
 
 
-def pixbuf_jpeg(pb):
-    ok, data = pb.save_to_bufferv("jpeg", ["quality"], ["92"])
+def pixbuf_jpeg(pb, quality=92):
+    ok, data = pb.save_to_bufferv("jpeg", ["quality"], [str(quality)])
     return bytes(data)
+
+
+def page_output(page, quality):
+    """(pixbuf, jpeg, dpi) of a page for the chosen quality."""
+    if quality not in QUALITY:
+        return page["pb"], page["jpeg"], page["dpi"]
+    jpeg_quality, max_dpi = QUALITY[quality]
+    pb, dpi = page["pb"], page["dpi"]
+    if max_dpi and dpi > max_dpi:
+        f = max_dpi / dpi
+        pb = pb.scale_simple(max(1, round(pb.get_width() * f)), max(1, round(pb.get_height() * f)),
+                             GdkPixbuf.InterpType.HYPER)
+        dpi = max_dpi
+    return pb, pixbuf_jpeg(pb, jpeg_quality), dpi
+
+
+def is_blank(pb):
+    """True for an empty page: almost no dark pixels inside the margins (scanner dust is tolerated)."""
+    w, h = pb.get_width(), pb.get_height()
+    f = min(1.0, 800.0 / max(w, h))
+    # nearest-neighbour keeps thin dark strokes dark (smoothing would turn text into light grey)
+    small = pb.scale_simple(max(1, int(w * f)), max(1, int(h * f)), GdkPixbuf.InterpType.NEAREST)
+    sw, sh, n, stride = small.get_width(), small.get_height(), small.get_n_channels(), small.get_rowstride()
+    px = small.get_pixels()
+    mx, my = int(sw * 0.06), int(sh * 0.06)
+    dark = total = 0
+    for y in range(my, sh - my):
+        row = y * stride
+        for x in range(mx, sw - mx):
+            i = row + x * n
+            total += 1
+            if px[i] * 3 + px[i + 1] * 6 + px[i + 2] < 1600:  # luminance < 160
+                dark += 1
+    return total > 0 and dark < total * 0.0002  # ~0.02 %: one line of text is not blank
+
+
+def safe_name(text, fallback):
+    text = re.sub(r'[/\\:*?"<>|\x00-\x1f]+', "-", text).strip(" .-")
+    return text or fallback
 
 
 def fmt_number(n):
@@ -304,7 +351,15 @@ class ScanPage(Gtk.Box):
         # --- Left column
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=False)
         left.set_size_request(290, -1)
-        self.pack_start(left, False, False, 0)
+        # scrolls on short screens (e.g. 1366x768) instead of making the window taller than the screen
+        left_scroll = Gtk.ScrolledWindow(hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                         vscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+                                         propagate_natural_width=True)
+        viewport = Gtk.Viewport(shadow_type=Gtk.ShadowType.NONE)
+        styled(viewport, "pc-plain")
+        viewport.add(left)
+        left_scroll.add(viewport)
+        self.pack_start(left_scroll, False, False, 0)
 
         self.color = combo([(_(e), v) for e, v in COLOR_CHOICES], "color")
         self.dpi = combo([("%d dpi" % d, d) for d in core.RESOLUTIONS], 300)
@@ -329,15 +384,44 @@ class ScanPage(Gtk.Box):
         status.pack_start(self.status, True, True, 0)
         left.pack_start(status, False, False, 0)
 
-        self.file_format = combo(FORMATS, "pdf")
-        self.save_btn = icon_button("document-save-symbolic", _("Save…"))
-        self.save_btn.connect("clicked", self.save)
+        c, _profile = read_settings()
+        doc = lambda key, default: c.get("client", key, fallback=default)
+        self.file_format = combo([(_(e), v) for e, v, _x, _m in DOC_FORMATS], doc("doc_format", "pdf"))
+        self.quality = combo([(_(e), v) for e, v in DOC_QUALITIES], doc("doc_quality", "original"))
+        self.quality.set_tooltip_text(_("Original keeps the scanner's image. Lower quality makes the file "
+                                        "smaller (lower resolution and stronger compression)."))
+        self.file_name = Gtk.Entry(text=doc("doc_name", ""), placeholder_text=_("Scanned document"))
+        self.file_name.set_tooltip_text(_("Date and time are added to the name"))
+        self.skip_blank = Gtk.CheckButton(label=_("Skip blank pages"))
+        self.skip_blank.set_active(doc("skip_blank", "no") == "yes")
+        self.open_after = Gtk.CheckButton(label=_("Open after saving"))
+        self.open_after.set_active(doc("open_after", "no") == "yes")
+        for w, signal in ((self.file_format, "changed"), (self.quality, "changed"), (self.file_name, "changed"),
+                          (self.skip_blank, "toggled"), (self.open_after, "toggled")):
+            w.connect(signal, self.on_doc_option)
+
+        self.save_btn = icon_button("document-save-symbolic", _("Save"), "suggested-action")
+        self.save_btn.set_tooltip_text(_("Save to the scan folder"))
+        self.save_btn.connect("clicked", self.save, False)
+        self.save_as_btn = icon_button("document-save-as-symbolic", _("Save as…"))
+        self.save_as_btn.connect("clicked", self.save, True)
+        self.print_btn = icon_button("printer-symbolic", _("Print…"), "flat")
+        self.print_btn.connect("clicked", self.print_pages)
         self.clear_btn = icon_button("edit-clear-all-symbolic", _("Clear all"), "flat")
         self.clear_btn.connect("clicked", self.clear_pages)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.pack_start(form([(_("Format"), self.file_format)]), False, False, 0)
-        box.pack_start(self.save_btn, False, False, 0)
-        box.pack_start(self.clear_btn, False, False, 0)
+        box.pack_start(form([(_("Format"), self.file_format), (_("Quality"), self.quality),
+                             (_("File name"), self.file_name)]), False, False, 0)
+        box.pack_start(self.skip_blank, False, False, 0)
+        box.pack_start(self.open_after, False, False, 0)
+        row = Gtk.Box(spacing=8, homogeneous=True, margin_top=4)
+        row.pack_start(self.save_btn, True, True, 0)
+        row.pack_start(self.save_as_btn, True, True, 0)
+        box.pack_start(row, False, False, 0)
+        row = Gtk.Box(spacing=8, homogeneous=True)
+        row.pack_start(self.print_btn, True, True, 0)
+        row.pack_start(self.clear_btn, True, True, 0)
+        box.pack_start(row, False, False, 0)
         self.doc_summary = _("No pages yet")
         self.document_card = card(_("Document"), box, description=" ")
         left.pack_start(self.document_card, False, False, 0)
@@ -503,11 +587,13 @@ class ScanPage(Gtk.Box):
         self.preview_stack.set_visible_child_name("page" if n else "neutral")
         self.thumb_scroll.set_visible(n > 0)
         self.tools.set_sensitive(n > 0)
-        self.save_btn.set_sensitive(n > 0)
-        self.clear_btn.set_sensitive(n > 0)
+        for b in (self.save_btn, self.save_as_btn, self.print_btn, self.clear_btn):
+            b.set_sensitive(n > 0)
         self.counter.set_text(_("Pages (%d)") % n if n else _("Preview"))
         description = self.document_card.get_children()[0].get_children()[0].get_children()[1]
-        description.set_text(_("%s, saved as a single file") % page_count(n) if n else _("No pages yet"))
+        one_file = not self.doc_format()[3]
+        description.set_text((_("%s, saved as a single file") if one_file or n == 1 else
+                              _("%s, saved as separate files")) % page_count(n) if n else _("No pages yet"))
         if not n and not self.spinner.get_property("active"):
             self.status.set_text(_("Ready."))
 
@@ -581,44 +667,128 @@ class ScanPage(Gtk.Box):
         Gdk.cairo_set_source_pixbuf(cr, scaled, x0, y0)
         cr.paint()
 
-    # --- save
-    def save(self, _widget):
+    # --- document options, save and print
+    def doc_format(self):
+        fid = self.file_format.get_active_id()
+        return next((f for f in DOC_FORMATS if f[1] == fid), DOC_FORMATS[0])
+
+    def on_doc_option(self, *_args):
+        self.update_view()
+        c, _profile = read_settings()
+        c.set("client", "doc_format", self.file_format.get_active_id() or "pdf")
+        c.set("client", "doc_quality", self.quality.get_active_id() or "original")
+        c.set("client", "doc_name", self.file_name.get_text().strip())
+        c.set("client", "skip_blank", "yes" if self.skip_blank.get_active() else "no")
+        c.set("client", "open_after", "yes" if self.open_after.get_active() else "no")
+        try:
+            write_settings(c)
+        except OSError as e:
+            log.error("Could not write settings: %s", e)
+
+    def output_pages(self):
+        """Pages to save or print, and how many blank pages were left out."""
+        pages = self.pages
+        if self.skip_blank.get_active():
+            pages = [p for p in self.pages if not is_blank(p["pb"])] or self.pages[:1]
+        return pages, len(self.pages) - len(pages)
+
+    def save(self, _widget, ask):
         if not self.pages:
             return
-        file_format = self.file_format.get_active_id()
+        _label, fid, ext, per_page = self.doc_format()
+        name = safe_name(self.file_name.get_text(), _("Scanned document"))
         folder = self.main_window.scan_folder()
         os.makedirs(folder, exist_ok=True)
-        d = Gtk.FileChooserDialog(title=_("Save scan"), transient_for=self.main_window,
-                                  action=Gtk.FileChooserAction.SAVE)
-        d.add_buttons(_("Cancel"), Gtk.ResponseType.CANCEL, _("Save"), Gtk.ResponseType.ACCEPT)
-        d.set_do_overwrite_confirmation(True)
-        d.set_current_folder(folder)
-        d.set_current_name(os.path.basename(core.unique_path(folder, _("Scanned document"), "." + file_format)))
-        if d.run() != Gtk.ResponseType.ACCEPT:
+        path = core.unique_path(folder, name, ext)
+        if ask:
+            d = Gtk.FileChooserDialog(title=_("Save scan"), transient_for=self.main_window,
+                                      action=Gtk.FileChooserAction.SAVE)
+            d.add_buttons(_("Cancel"), Gtk.ResponseType.CANCEL, _("Save"), Gtk.ResponseType.ACCEPT)
+            d.set_do_overwrite_confirmation(True)
+            d.set_current_folder(folder)
+            d.set_current_name(os.path.basename(path))
+            if d.run() != Gtk.ResponseType.ACCEPT:
+                d.destroy()
+                return
+            path = d.get_filename()
             d.destroy()
-            return
-        path = d.get_filename()
-        d.destroy()
+        root = path[:-len(ext)] if path.lower().endswith(ext) else path
+        pages, skipped = self.output_pages()
+        quality = self.quality.get_active_id()
         try:
-            if file_format == "pdf":
-                if not path.lower().endswith(".pdf"):
-                    path += ".pdf"
-                core.write_file(path, core.jpegs_to_pdf([s["jpeg"] for s in self.pages],
-                                                     self.pages[0]["dpi"]))
-                paths = [path]
+            outputs = [page_output(p, quality) for p in pages]
+            if fid == "pdf":
+                files = [(root + ext, core.jpegs_to_pdf([o[1] for o in outputs], outputs[0][2],
+                                                        title=os.path.basename(root)))]
             else:
-                root = path[:-4] if path.lower().endswith(".jpg") else path
-                paths = [root + ".jpg"] if len(self.pages) == 1 else [
-                    "%s_%d.jpg" % (root, i + 1) for i in range(len(self.pages))]
-                for p, s in zip(paths, self.pages):
-                    core.write_file(p, s["jpeg"])
-        except OSError as e:
+                names = [root + ext] if len(outputs) == 1 else ["%s_%d%s" % (root, i + 1, ext)
+                                                                for i in range(len(outputs))]
+                files = []
+                for target, (pb, jpeg, dpi) in zip(names, outputs):
+                    if fid == "pdfs":
+                        data = core.jpegs_to_pdf([jpeg], dpi, title=os.path.basename(target)[:-len(ext)])
+                    elif fid == "jpg":
+                        data = jpeg
+                    else:  # lossless formats: the (possibly reduced) image itself
+                        ok, data = pb.save_to_bufferv("png" if fid == "png" else "tiff", [], [])
+                        data = bytes(data)
+                    files.append((target, data))
+            for target, data in files:
+                core.write_file(target, data)
+        except (OSError, GLib.Error, ValueError) as e:
             log.error("Could not save: %s", e)
             self.main_window.warn(_("Could not save:\n%s") % e)
             return
-        log.info("Saved: %s (%d pages, %s)", paths[0], len(self.pages), file_format)
-        self.status.set_text(_("Saved: %s") % os.path.basename(paths[0]))
+        paths = [f[0] for f in files]
+        size = sum(len(f[1]) for f in files)
+        log.info("Saved: %s (%d pages, %s, %s, %d blank skipped, %d bytes)",
+                 paths[0], len(pages), fid, quality, skipped, size)
+        text = _("Saved: %s") % os.path.basename(paths[0])
+        if len(paths) > 1:
+            text = _("Saved %d files: %s …") % (len(paths), os.path.basename(paths[0]))
+        text += " (%s)" % GLib.format_size(size)
+        if skipped:
+            text += "\n" + (_("1 blank page skipped") if skipped == 1 else _("%d blank pages skipped") % skipped)
+        self.status.set_text(text)
         self.main_window.notify_user(_("Saved"), paths[0])
+        if self.open_after.get_active():
+            open_path(paths[0])
+
+    def print_pages(self, _widget):
+        if not self.pages:
+            return
+        pages, skipped = self.output_pages()
+        op = Gtk.PrintOperation()
+        op.set_n_pages(len(pages))
+        op.set_job_name(safe_name(self.file_name.get_text(), _("Scanned document")))
+        op.set_embed_page_setup(True)
+        setup = Gtk.PageSetup()
+        paper = {"A4": Gtk.PAPER_NAME_A4, "A5": Gtk.PAPER_NAME_A5, "Letter": Gtk.PAPER_NAME_LETTER,
+                 "Legal": Gtk.PAPER_NAME_LEGAL}.get(self.paper.get_active_id())
+        if paper:
+            setup.set_paper_size(Gtk.PaperSize.new(paper))
+        op.set_default_page_setup(setup)
+
+        def draw_page(_op, context, n):
+            pb = pages[n]["pb"]
+            cw, ch = context.get_width(), context.get_height()
+            ratio = min(cw / pb.get_width(), ch / pb.get_height())
+            cr = context.get_cairo_context()
+            cr.translate((cw - pb.get_width() * ratio) / 2, 0)
+            cr.scale(ratio, ratio)
+            Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
+            cr.paint()
+
+        op.connect("draw-page", draw_page)
+        try:
+            result = op.run(Gtk.PrintOperationAction.PRINT_DIALOG, self.main_window)
+        except GLib.Error as e:
+            log.error("Could not print: %s", e)
+            self.main_window.warn(_("Could not print:\n%s") % e.message)
+            return
+        if result == Gtk.PrintOperationResult.APPLY:
+            log.info("Sent to printer: %d pages (%d blank skipped)", len(pages), skipped)
+            self.status.set_text(_("Sent to the printer: %s") % page_count(len(pages)))
 
 
 # --------------------------------------------------------------------------
@@ -890,7 +1060,18 @@ class DevicePage(Gtk.ScrolledWindow):
 
         def work():
             try:
-                r = core.build_device_report(device)
+                # Window hidden (tray): reuse the background service's report (it polls every minute)
+                # instead of querying the device a second time.
+                r = None
+                if not force and not self.main_window.get_visible():
+                    cached = core.read_state().get("device_report") or {}
+                    if time.time() - cached.get("time", 0) < 150:
+                        if cached.get("access_error"):
+                            raise OSError(cached["access_error"])
+                        if "problems" in cached:
+                            r = cached
+                if r is None:
+                    r = core.build_device_report(device)
                 if not r.get("model") and r["source_errors"]:
                     raise OSError("; ".join(r["source_errors"].values())[:200])
                 GLib.idle_add(self.render, r, None, notify)
