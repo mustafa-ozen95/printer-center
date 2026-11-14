@@ -27,7 +27,8 @@ Arayüz Türkçe ve İngilizce; dil sistemden alınır, Ayarlar'dan değiştiril
   days left), maintenance kit life, trays, counters, security checks. New faults raise a
   desktop notification.
 - **Logs:** service and app events are kept in `~/.local/state/printer-center/`
-  (1 MB × 3, rotated) and can be filtered and copied in the app.
+  (one file per day, deleted after 7 days) and can be filtered, copied and cleared in the app.
+  An unreachable device is logged once per outage, not on every retry.
 - **Notification area:** the app starts in the system tray at login; the icon follows the
   printer state. Closing the window keeps it running in the tray.
 - **Automatic updates** from this repository's release tags, with a desktop notification after each update.

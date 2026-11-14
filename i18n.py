@@ -326,7 +326,6 @@ TR = {
     'Select <b>%s</b> from the list and start.': 'Listeden <b>%s</b> adını seçip başlatın.',
     'Serial no.': 'Seri no',
     'Serial number': 'Seri numarası',
-    'Service and interface records · %s': 'Servis ve arayüz kayıtları · %s',
     'Service required': 'Servis gerekli',
     'Settings': 'Ayarlar',
     'Settings saved': 'Ayarlar kaydedildi',
@@ -417,4 +416,8 @@ TR = {
     'Could not print:\n%s': 'Yazdırılamadı:\n%s',
     'Sent to the printer: %s': 'Yazıcıya gönderildi: %s',
     'Version %s has been installed. The program restarts with it by itself once no scan is in progress and the scanned pages are saved.': '%s sürümü kuruldu. Süren tarama kalmadığında ve taranan sayfalar kaydedildiğinde program kendiliğinden yeni sürümle yeniden başlar.',
+    'Clear log': 'Günlüğü temizle',
+    'Service and interface records · kept for %d days · %s': 'Servis ve arayüz kayıtları · %d gün saklanır · %s',
+    'Delete all log records?': 'Tüm günlük kayıtları silinsin mi?',
+    'Could not clear the log:\n%s': 'Günlük temizlenemedi:\n%s',
 }

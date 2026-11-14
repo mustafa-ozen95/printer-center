@@ -1070,7 +1070,7 @@ class DevicePage(Gtk.ScrolledWindow):
                 r = None
                 if not force and not self.main_window.get_visible():
                     cached = core.read_state().get("device_report") or {}
-                    if time.time() - cached.get("time", 0) < 150:
+                    if time.time() - cached.get("time", 0) < 360:  # service polls every 1-5 min
                         if cached.get("access_error"):
                             raise OSError(cached["access_error"])
                         if "problems" in cached:
@@ -1897,7 +1897,8 @@ class LogPage(Gtk.Box):
         for icon, tooltip, func in (
                 ("view-refresh-symbolic", _("Refresh"), lambda b: self.refresh(force=True)),
                 ("edit-copy-symbolic", _("Copy to clipboard"), lambda b: self.copy_report()),
-                ("folder-open-symbolic", _("Open log folder"), lambda b: open_path(core.LOG_DIR))):
+                ("folder-open-symbolic", _("Open log folder"), lambda b: open_path(core.LOG_DIR)),
+                ("edit-clear-all-symbolic", _("Clear log"), lambda b: self.clear_log())):
             d = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
             d.set_tooltip_text(tooltip)
             d.connect("clicked", func)
@@ -1917,13 +1918,24 @@ class LogPage(Gtk.Box):
         scroller = Gtk.ScrolledWindow()
         scroller.add(self.xml_text)
         self.summary = make_label("", "pc-dim")
-        k = card(_("Event log"), scroller, description=_("Service and interface records · %s")
-                 % core.LOG_DIR.replace(os.path.expanduser("~"), "~"), right=right)
+        k = card(_("Event log"), scroller, description=_("Service and interface records · kept for %d days · %s")
+                 % (core.LOG_KEEP_DAYS, core.LOG_DIR.replace(os.path.expanduser("~"), "~")), right=right)
         k.pack_start(self.summary, False, False, 0)
         self.pack_start(k, True, True, 0)
         self.scroller = scroller
         self.connect("map", lambda *_args: self.refresh(force=True))
         GLib.timeout_add_seconds(5, self.refresh)
+
+    def clear_log(self):
+        if not self.main_window.ask(_("Delete all log records?")):
+            return
+        try:
+            core.clear_logs()
+        except OSError as e:
+            self.main_window.warn(_("Could not clear the log:\n%s") % e)
+            return
+        log.info("Log cleared by the user")
+        self.refresh(force=True)
 
     def rows(self):
         everything = core.read_logs()

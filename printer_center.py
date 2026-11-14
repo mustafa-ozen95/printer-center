@@ -62,7 +62,7 @@ STATE_PATH = os.path.expanduser("~/.cache/printer-center/state.json")
 LOG_DIR = os.path.expanduser("~/.local/state/printer-center")
 
 # Version: bump this when releasing and push a vX.Y.Z tag with the same name (updater.py compares the two)
-VERSION = "2.3.3"
+VERSION = "2.4.0"
 UPDATE_STATE_PATH = "/var/lib/printer-center/update.json"
 UPDATE_SERVICE = "printer-center-update.service"
 INSTALL_SERVICE = "printer-center-install.service"
@@ -865,7 +865,7 @@ def problem_diff(previous, now):
 def monitor_device(settings, notify, shutdown, interval=60):
     """Inside the service: polls the device regularly, writes the report to the state file
     and sends a desktop notification on a new fault."""
-    previous, unreachable = None, False
+    previous, unreachable, wait = None, False, interval
     while not shutdown.is_set():
         try:
             report = build_device_report(settings.device)
@@ -886,11 +886,13 @@ def monitor_device(settings, notify, shutdown, interval=60):
             write_state(device_report=report)
         except Exception as e:
             if not unreachable:
-                log.warning("Cannot monitor device: %s", e)
+                log.warning("Cannot monitor device: %s", friendly_error(e))
                 notify(_("Printer unreachable"), str(e)[:120], "printer-error")
             unreachable = True
             write_state(device_report={"level": "error", "time": time.time(), "access_error": str(e)[:200]})
-        shutdown.wait(interval)
+        # unreachable: poll less often (2, 4, then every 5 minutes) until it answers again
+        wait = min(wait * 2, 300) if unreachable else interval
+        shutdown.wait(wait)
 
 
 # --------------------------------------------------------------------------
@@ -1040,7 +1042,7 @@ class Subscription:
         write_state(registered=False, error="", running=False)
 
     def loop(self):
-        delay = 0
+        delay, retry = 0, 0  # retry > 0 while the device cannot be reached
         while not self.stop.wait(delay):
             try:
                 if self.identity:
@@ -1052,11 +1054,14 @@ class Subscription:
                         self.subscribe()
                 else:
                     self.subscribe()
-                delay = self.REFRESH_INTERVAL
+                delay, retry = self.REFRESH_INTERVAL, 0
             except (SoapError, OSError, ET.ParseError) as e:
-                log.warning("Could not reach device: %s; retrying in 60 s", e)
+                # logged once per outage; retries get slower (1, 2, 4, then every 5 minutes)
+                if not retry:
+                    log.warning("Could not reach device for panel scanning: %s; retrying quietly", friendly_error(e))
                 write_state(registered=False, error=_("Could not reach the device: %s") % friendly_error(e))
-                delay = 60
+                retry = min(retry * 2, 300) if retry else 60
+                delay = retry
 
 
 class PanelScanner:
@@ -1266,8 +1271,12 @@ class _SourceFilter(logging.Filter):
         return True
 
 
+LOG_KEEP_DAYS = 7
+
+
 def setup_logging(source, verbose=False, console=True):
-    """source: e.g. 'service' or 'gui'. ~/.local/state/printer-center/<source>.log (1 MB x 3)."""
+    """source: e.g. 'service' or 'gui'. ~/.local/state/printer-center/<source>.log, a new file every
+    day; files older than LOG_KEEP_DAYS days are deleted automatically."""
     import logging.handlers
     root = logging.getLogger()
     root.setLevel(logging.DEBUG if verbose else logging.INFO)
@@ -1275,9 +1284,12 @@ def setup_logging(source, verbose=False, console=True):
     log_filter = _SourceFilter(source)
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
-        file_path = logging.handlers.RotatingFileHandler(
-            os.path.join(LOG_DIR, source + ".log"), maxBytes=1_000_000,
-            backupCount=3, encoding="utf-8")
+        for name in os.listdir(LOG_DIR):  # size-rotated files of versions before 2.4
+            if re.match(r"^%s\.log\.\d$" % source, name):
+                os.remove(os.path.join(LOG_DIR, name))
+        file_path = logging.handlers.TimedRotatingFileHandler(
+            os.path.join(LOG_DIR, source + ".log"), when="midnight",
+            backupCount=LOG_KEEP_DAYS - 1, encoding="utf-8")
         file_path.setFormatter(file_format)
         file_path.addFilter(log_filter)
         root.addHandler(file_path)
@@ -1287,6 +1299,16 @@ def setup_logging(source, verbose=False, console=True):
         k = logging.StreamHandler(sys.stdout)
         k.setFormatter(logging.Formatter("%(levelname)s %(message)s"))
         root.addHandler(k)
+
+
+def clear_logs():
+    """Delete the log history. Open log files are emptied (the processes keep writing to them)."""
+    for name in os.listdir(LOG_DIR):
+        path = os.path.join(LOG_DIR, name)
+        if name.endswith(".log"):
+            open(path, "w").close()
+        elif ".log." in name:
+            os.remove(path)
 
 
 def read_logs(limit=1000):
