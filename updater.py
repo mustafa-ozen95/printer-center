@@ -5,7 +5,8 @@ Lists the public repository's vX.Y.Z tags over HTTPS (certificate verified), com
 tag's files (a shallow pack, decoded here) and installs them with `install.sh --files`.
 State is written to /var/lib/printer-center/update.json (read by the app and the service).
 
-  updater.py            check and install a newer version
+  updater.py            check; install a newer version unless a user turned automatic installation off
+  updater.py --install  check and install now (the app's "Install now" button)
   updater.py --check    check only
   updater.py --force    reinstall even if the version is the same
 """
@@ -13,6 +14,7 @@ State is written to /var/lib/printer-center/update.json (read by the app and the
 import argparse
 import datetime as dt
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -48,6 +50,21 @@ def read_config():
     m = re.search(r"([\w.-]+/[\w.-]+?)(?:\.git)?$", config["repo"])
     config["repo"] = m.group(1) if m else ""
     return config
+
+
+def auto_install_allowed():
+    """False if any user of this computer unticked "Install updates automatically"
+    ([client] auto_update = no in ~/.config/printer-center/settings.ini)."""
+    import configparser
+    for path in glob.glob("/home/*/.config/printer-center/settings.ini"):
+        c = configparser.ConfigParser(interpolation=None)
+        try:
+            c.read(path, encoding="utf-8")
+            if not c.getboolean("client", "auto_update", fallback=True):
+                return False
+        except (configparser.Error, ValueError, OSError):
+            continue
+    return True
 
 
 def version_tuple(s):
@@ -344,6 +361,8 @@ def install(config, tag, sha):
 def main():
     ap = argparse.ArgumentParser(description="Printer Center updater")
     ap.add_argument("--check", action="store_true", help="check only, do not install")
+    ap.add_argument("--install", action="store_true", help="install a newer version even if automatic "
+                                                          "installation is turned off")
     ap.add_argument("--force", action="store_true", help="reinstall the same version")
     args = ap.parse_args()
     if os.geteuid() != 0:
@@ -372,7 +391,10 @@ def main():
         last = max(tags, key=version_tuple)
         newer = version_tuple(last) > version_tuple(current)
         emit("Installed %s, latest release %s" % (current, last))
-        if not (newer or args.force) or args.check:
+        manual_only = not (args.install or args.force or auto_install_allowed())
+        if manual_only and newer:
+            emit("Automatic installation is turned off; waiting for the user to install %s" % last)
+        if not (newer or args.force) or args.check or manual_only:
             write_state(current=current, latest=last, last_check=now,
                         status="update_available" if newer else "up_to_date", error="")
             return 0

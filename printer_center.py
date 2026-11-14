@@ -62,9 +62,10 @@ STATE_PATH = os.path.expanduser("~/.cache/printer-center/state.json")
 LOG_DIR = os.path.expanduser("~/.local/state/printer-center")
 
 # Version: bump this when releasing and push a vX.Y.Z tag with the same name (updater.py compares the two)
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 UPDATE_STATE_PATH = "/var/lib/printer-center/update.json"
 UPDATE_SERVICE = "printer-center-update.service"
+INSTALL_SERVICE = "printer-center-install.service"
 
 log = logging.getLogger("printer-center")
 
@@ -107,6 +108,29 @@ def migrate_legacy_settings(path=SETTINGS_PATH, legacy=LEGACY_SETTINGS_PATH):
 # --------------------------------------------------------------------------
 # SOAP
 # --------------------------------------------------------------------------
+
+def friendly_error(error):
+    """Short, translated description of an error for the screen; technical details go to the log.
+    Errors joined with "; " (one per data source) are described once each."""
+    lines = str(error).strip().splitlines()
+    parts = []
+    for raw in re.split(r";\s*", lines[0] if lines else ""):
+        low = raw.lower()
+        if isinstance(error, (TimeoutError, socket.timeout)) or "timed out" in low or "timeout" in low:
+            text = _("no response from the device")
+        elif "refused" in low:
+            text = _("the device refused the connection")
+        elif "no route" in low or "unreachable" in low:
+            text = _("no network route to the device")
+        elif "name or service" in low or "name resolution" in low or "nodename" in low:
+            text = _("the device address could not be resolved")
+        else:
+            text = re.sub(r"^\w*(Error|Exception): ", "", raw.strip())
+            text = re.sub(r"^<urlopen error (.*)>$", r"\1", text).strip("<> ")
+        if text and text not in parts:
+            parts.append(text)
+    return ("; ".join(parts) or error.__class__.__name__)[:160]
+
 
 def envelope(to, action, body, extra_header=""):
     return (
@@ -583,10 +607,34 @@ def _date(yyyymmdd):
     return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3))) if m else None
 
 
+def device_reachable(ip, ports=(80, 631, 8018), timeout=3):
+    """Quick check before the detailed report: True if any of the device's TCP ports answers.
+    Probes run in parallel, so an unreachable device is reported within `timeout` seconds."""
+    answered = threading.Event()
+
+    def probe(port):
+        try:
+            with socket.create_connection((ip, port), timeout=timeout):
+                answered.set()
+        except OSError:
+            pass
+    threads = [threading.Thread(target=probe, args=(p,), daemon=True) for p in ports]
+    for t in threads:
+        t.start()
+    deadline = time.time() + timeout + 0.5
+    for t in threads:
+        t.join(max(0, deadline - time.time()))
+        if answered.is_set():
+            return True
+    return answered.is_set()
+
+
 def build_device_report(device_url):
     """Detailed report from all sources. Each source is independent; if one fails the others still arrive.
     'problems': [{"token","title","advice","level","source"}]. User-visible texts are translated."""
     ip = urllib.parse.urlparse(device_url).hostname or device_url
+    if not device_reachable(ip):
+        raise TimeoutError("device %s did not answer on any port (timed out)" % ip)
     r = {"ip": ip, "time": time.time(), "problems": [], "source_errors": {}, "supplies": [], "maintenance": [],
          "trays": [], "counters": [], "info": {}, "security": []}
 
@@ -997,7 +1045,7 @@ class Subscription:
                 delay = self.REFRESH_INTERVAL
             except (SoapError, OSError, ET.ParseError) as e:
                 log.warning("Could not reach device: %s; retrying in 60 s", e)
-                write_state(registered=False, error=_("Could not reach the device: %s") % e)
+                write_state(registered=False, error=_("Could not reach the device: %s") % friendly_error(e))
                 delay = 60
 
 
@@ -1148,6 +1196,13 @@ def watch_updates(notify, shutdown, interval=300):
                 os.makedirs(os.path.dirname(marker), exist_ok=True)
                 with open(marker, "w", encoding="utf-8") as f:
                     f.write(last)
+            latest = d.get("latest")
+            if d.get("status") == "update_available" and latest != getattr(watch_updates, "_offered", None):
+                watch_updates._offered = latest
+                log.info("New version available: %s (automatic installation is off)", latest)
+                notify(_("New Printer Center version"),
+                       _("Version %s is available. Install it from Settings → About and updates.")
+                       % (latest or "").lstrip("v"), "system-software-update")
             if d.get("status") == "error" and d.get("error") != getattr(watch_updates, "_last_error", None):
                 log.warning("Automatic update failed: %s", d.get("error"))
             watch_updates._last_error = d.get("error") if d.get("status") == "error" else None

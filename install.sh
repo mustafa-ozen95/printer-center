@@ -64,7 +64,8 @@ install_files() {
 	install -m 0644 "$SRC_DIR/printer_center.py" "$SRC_DIR/i18n.py" "$APP/"
 	install -m 0755 "$SRC_DIR/printer_center_gui.py" "$SRC_DIR/updater.py" "$APP/"
 	install -m 0644 "$SRC_DIR/printer-center.service" /etc/systemd/user/
-	install -m 0644 "$SRC_DIR/printer-center-update.service" "$SRC_DIR/printer-center-update.timer" /etc/systemd/system/
+	install -m 0644 "$SRC_DIR/printer-center-update.service" "$SRC_DIR/printer-center-update.timer" \
+		"$SRC_DIR/printer-center-install.service" /etc/systemd/system/
 	install -m 0644 "$SRC_DIR/io.github.mustafa_ozen95.PrinterCenter.desktop" /usr/share/applications/
 	command -v update-desktop-database >/dev/null && update-desktop-database -q /usr/share/applications || true
 	# polkit >= 106 (JS rules): the "Check for updates" button needs no password; older polkit asks for admin

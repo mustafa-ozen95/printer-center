@@ -232,6 +232,7 @@ def icon_button(icon, label_text, *classes):
     inner = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
     inner.pack_start(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON), False, False, 0)
     inner.pack_start(Gtk.Label(label=label_text), False, False, 0)
+    inner.show_all()  # buttons hidden with set_no_show_all() must still show their content
     d.add(inner)
     return styled(d, *classes)
 
@@ -277,8 +278,8 @@ def page_count(n):
 
 
 def error_text(error):
-    m = str(error).strip().splitlines()
-    return (m[0] if m else error.__class__.__name__)[:160]
+    """Readable, translated error for the screen (details are logged where the error occurs)."""
+    return core.friendly_error(error)
 
 
 # --------------------------------------------------------------------------
@@ -894,18 +895,19 @@ class DevicePage(Gtk.ScrolledWindow):
         self._running = False
         previous_error, self._last_error_msg = getattr(self, "_last_error_msg", None), bool(error)
         if error and previous_error is not True:
-            log.warning("Device unreachable: %s", error_text(error))
+            log.warning("Device unreachable: %s", error)
         elif not error and previous_error is True:
             log.info("Device reachable again")
         self.last_check.set_text(_("Last check %s") % dt.datetime.now().strftime("%H:%M:%S"))
         if error:
             self.badge.set_text(_("Unreachable"))
             swap_class(self.badge, ("ok", "warning", "error", "neutral"), "error")
-            self.display_text.set_text(error_text(error))
+            reason = error_text(error)
+            self.display_text.set_text(reason[:1].upper() + reason[1:])
             self.main_window.show_device_status(None, _("Unreachable"), "error")
-            self.render_problems([{"title": _("Cannot reach the device"), "level": "error", "source": "",
+            self.render_problems([{"title": _("Cannot reach the device"), "level": "error", "source": "", "retry": True,
                                    "advice": _("Check that the device is on and connected to the network, "
-                                               "and the IP address in Settings. (%s)") % error_text(error)}])
+                                               "and the IP address in Settings. (%s)") % reason}])
             if notify:
                 self.main_window.warn(_("Could not reach the device:\n%s") % error_text(error))
             return
@@ -967,6 +969,10 @@ class DevicePage(Gtk.ScrolledWindow):
         for c in container.get_children():
             container.remove(c)
 
+    def retry(self, button):
+        button.set_sensitive(False)  # the row is redrawn when the check finishes (a few seconds)
+        self.refresh(force=True)
+
     def render_problems(self, problems):
         self.clear_children(self.problems)
         if not problems:
@@ -996,6 +1002,11 @@ class DevicePage(Gtk.ScrolledWindow):
             if x.get("source"):
                 s.pack_start(styled(Gtk.Label(label=x["source"], valign=Gtk.Align.START), "pc-badge",
                                    x["level"]), False, False, 0)
+            if x.get("retry"):
+                b = icon_button("view-refresh-symbolic", _("Try again"))
+                b.set_valign(Gtk.Align.CENTER)
+                b.connect("clicked", lambda _b: self.retry(_b))
+                s.pack_start(b, False, False, 0)
             self.problems.pack_start(s, False, False, 0)
         self.problems.show_all()
 
@@ -1219,15 +1230,41 @@ class SettingsPage(Gtk.ScrolledWindow):
                                        "suggested-action")
         self.upd_restart_btn.connect("clicked", lambda _b: self.main_window.relaunch())
         self.upd_restart_btn.set_no_show_all(True)
+        self.upd_install_btn = icon_button("software-update-available-symbolic", _("Install now"),
+                                           "suggested-action")
+        self.upd_install_btn.connect("clicked", lambda b: self.check_for_updates(b, core.INSTALL_SERVICE))
+        self.upd_install_btn.set_no_show_all(True)
         self.upd_spinner = Gtk.Spinner()
         buttons = Gtk.Box(spacing=8)
-        for p in (self.upd_check_btn, self.upd_spinner, self.upd_restart_btn):
+        for p in (self.upd_check_btn, self.upd_install_btn, self.upd_spinner, self.upd_restart_btn):
             buttons.pack_start(p, False, False, 0)
+        c, _profile = read_settings()
+        self.upd_auto = Gtk.CheckButton(label=_("Install updates automatically"))
+        self.upd_auto.set_active(self.auto_update_enabled(c))
+        self.upd_auto.set_tooltip_text(_("When off, new versions are only announced; you decide when to "
+                                         "install them."))
+        self.upd_auto.connect("toggled", self.on_auto_update_toggled)
         return card(_("About and updates"),
                     form([(_("Version"), self.upd_version), (_("Last check"), self.upd_last)]),
-                    self.upd_message, buttons,
-                    description=_("New versions are checked for and installed from the repository every day"),
+                    self.upd_auto, self.upd_message, buttons,
+                    description=_("New versions are checked for in the repository every day"),
                     right=self.upd_badge)
+
+    @staticmethod
+    def auto_update_enabled(c):
+        try:
+            return c.getboolean("client", "auto_update", fallback=True)
+        except ValueError:
+            return True
+
+    def on_auto_update_toggled(self, button):
+        c, _profile = read_settings()
+        if not c.has_section("client"):
+            c.add_section("client")
+        c["client"]["auto_update"] = "yes" if button.get_active() else "no"
+        write_settings(c)
+        log.info("Automatic update installation %s", "on" if button.get_active() else "off")
+        self.render_update()
 
     def render_update(self):
         d = read_update_state()
@@ -1246,9 +1283,11 @@ class SettingsPage(Gtk.ScrolledWindow):
             badge, level, message = (_("Off"), "neutral",
                                      _("Automatic updates are not configured on this computer."))
         elif status == "update_available":
-            badge, level, message = (_("New version"), "warning",
-                                     _("Version %s is available in the repository; waiting to be installed.")
-                                     % d.get("latest"))
+            if self.upd_auto.get_active():
+                text = _("Version %s is available in the repository; it will be installed at the next daily check.")
+            else:
+                text = _("Version %s is available. Press \"Install now\" to install it.")
+            badge, level, message = _("New version"), "warning", text % (d.get("latest") or "").lstrip("v")
         elif status in ("checking", "installing"):
             badge, level, message = _("In progress"), "neutral", _("Checking for updates…")
         elif d:
@@ -1263,6 +1302,7 @@ class SettingsPage(Gtk.ScrolledWindow):
         swap_class(self.upd_badge, ("ok", "warning", "error", "neutral"), level)
         self.upd_message.set_text(message)
         self.upd_restart_btn.set_visible(newer_installed)
+        self.upd_install_btn.set_visible(status == "update_available" and not newer_installed)
         if newer_installed and not self.main_window.is_visible():
             # Running only in the tray: switch to the new version without disturbing anyone
             GLib.idle_add(lambda: self.main_window.relaunch(tray=True))
@@ -1273,15 +1313,17 @@ class SettingsPage(Gtk.ScrolledWindow):
                                          _("Version %s has been installed. Restart the program.") % on_disk)
         return False
 
-    def check_for_updates(self, _widget):
+    def check_for_updates(self, _widget, unit=core.UPDATE_SERVICE):
         self.upd_check_btn.set_sensitive(False)
+        self.upd_install_btn.set_sensitive(False)
         self.upd_spinner.start()
-        self.upd_message.set_text(_("Checking the repository…"))
+        self.upd_message.set_text(_("Installing the new version…") if unit == core.INSTALL_SERVICE
+                                  else _("Checking the repository…"))
 
         def work():
             try:
                 # System unit: no password with the polkit rule, otherwise asks for the admin password
-                r = subprocess.run(["systemctl", "start", core.UPDATE_SERVICE],
+                r = subprocess.run(["systemctl", "start", unit],
                                    capture_output=True, text=True, timeout=900)
                 error = (r.stderr or r.stdout).strip() if r.returncode else ""
             except Exception as e:
@@ -1293,6 +1335,7 @@ class SettingsPage(Gtk.ScrolledWindow):
             def done():
                 self.upd_spinner.stop()
                 self.upd_check_btn.set_sensitive(True)
+                self.upd_install_btn.set_sensitive(True)
                 self.render_update()
                 if error and read_update_state().get("status") != "error":
                     self.upd_message.set_text(_("Could not start the check: %s") % error.splitlines()[-1])

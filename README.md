@@ -78,7 +78,12 @@ HTTPS (certificate verified). If one is newer than the installed version it fetc
 (a built-in, read-only git client), checks that its `VERSION` matches, installs it with
 `install.sh --files`, restarts the services and notifies the user with the tag message as
 release notes. Nothing is sent from the computer. *Settings → About and updates* can check
-on demand. State: `/var/lib/printer-center/update.json`, details:
+on demand.
+
+Automatic installation can be turned off with the *Install updates automatically* checkbox
+(`auto_update = no` under `[client]` in `settings.ini`). The timer then only checks and
+announces a new version; it is installed when the user clicks *Install now*. If any user on the
+computer has turned it off, the computer is not updated automatically. State: `/var/lib/printer-center/update.json`, details:
 `journalctl -u printer-center-update`.
 
 Publishing a release (maintainer):

@@ -1,8 +1,9 @@
-// Users with an active session (local or xrdp) may start only printer-center-update.service
-// without a password, via the "Check for updates" button.
+// Users with an active session (local or xrdp) may start only these two units without a
+// password: the app's "Check for updates" and "Install now" buttons.
 polkit.addRule(function (action, subject) {
     if (action.id == "org.freedesktop.systemd1.manage-units" &&
-        action.lookup("unit") == "printer-center-update.service" &&
+        (action.lookup("unit") == "printer-center-update.service" ||
+         action.lookup("unit") == "printer-center-install.service") &&
         action.lookup("verb") == "start" && subject.active) {
         return polkit.Result.YES;
     }

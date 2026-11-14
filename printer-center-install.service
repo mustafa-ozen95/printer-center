@@ -1,0 +1,9 @@
+[Unit]
+Description=Install the latest Printer Center version now (the app's "Install now" button)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/printer-center/updater.py --install
+Nice=10
