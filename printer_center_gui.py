@@ -347,6 +347,7 @@ class ScanPage(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=16, margin=16)
         self.main_window = main_window
         self.pages = []  # {"jpeg": bytes, "pb": Pixbuf, "dpi": int}
+        self.dirty = False  # scanned pages changed since the last save
 
         # --- Left column
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, hexpand=False)
