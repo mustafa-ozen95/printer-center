@@ -62,7 +62,7 @@ STATE_PATH = os.path.expanduser("~/.cache/printer-center/state.json")
 LOG_DIR = os.path.expanduser("~/.local/state/printer-center")
 
 # Version: bump this when releasing and push a vX.Y.Z tag with the same name (updater.py compares the two)
-VERSION = "2.4.1"
+VERSION = "2.4.2"
 UPDATE_STATE_PATH = "/var/lib/printer-center/update.json"
 UPDATE_SERVICE = "printer-center-update.service"
 INSTALL_SERVICE = "printer-center-install.service"
@@ -1435,6 +1435,20 @@ def ipp_jobs(printer_uri, which="not-completed", limit=50, user=None):
     status, groups = ipp_request(printer_uri, 0x000A, attr)
     if status >= 0x0400:
         raise IppError(_("IPP status 0x%04x") % status)
+    # time-at-* are in printer-up-time units (RFC 8011 5.3.14): CUPS uses epoch seconds,
+    # but many devices count seconds since power-on, which would show as 01.01.1970.
+    offset = 0
+    try:
+        _status, up = ipp_request(printer_uri, 0x000B, [(0x44, "requested-attributes", ["printer-up-time"])])
+        up_time = next((g["printer-up-time"] for g in up if isinstance(g.get("printer-up-time"), int)), None)
+        if up_time is not None:
+            offset = int(time.time()) - up_time
+    except IppError:
+        pass
+
+    def stamp(value):
+        return value + offset if isinstance(value, int) and value > 0 else None
+
     jobs = []
     for g in groups:
         if g.get("_group") != 2 or "job-id" not in g:
@@ -1449,8 +1463,8 @@ def ipp_jobs(printer_uri, which="not-completed", limit=50, user=None):
             "status": status_,
             "status_text": _(IPP_JOB_STATES[status_]) if status_ in IPP_JOB_STATES else str(status_),
             "reason": reason if isinstance(reason, list) else ([reason] if reason else []),
-            "time": g.get("time-at-creation") if isinstance(g.get("time-at-creation"), int) else None,
-            "completed": g.get("time-at-completed") if isinstance(g.get("time-at-completed"), int) else None,
+            "time": stamp(g.get("time-at-creation")),
+            "completed": stamp(g.get("time-at-completed")),
             "kbytes": g.get("job-k-octets"),
             "page": g.get("job-impressions-completed") or g.get("job-media-sheets-completed"),
         })

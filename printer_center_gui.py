@@ -1628,7 +1628,7 @@ class QueuePage(Gtk.ScrolledWindow):
         for p in (self.queue_badge, self.start_btn, self.cancel_all_btn):
             right.pack_start(p, False, False, 0)
         self.local = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
-        self.local_card = card(_("Print jobs from this computer"), self.local,
+        self.local_card = card("%s (%s)" % (_("Print jobs from this computer"), socket.gethostname()), self.local,
                                description=_("Pending and recently completed print jobs"), right=right)
         inner.pack_start(self.local_card, False, False, 0)
 
