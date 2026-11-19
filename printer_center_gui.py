@@ -1632,6 +1632,11 @@ class QueuePage(Gtk.ScrolledWindow):
                                description=_("Pending and recently completed print jobs"), right=right)
         inner.pack_start(self.local_card, False, False, 0)
 
+        self.network = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
+        inner.pack_start(card(_("Print jobs from other computers"), self.network,
+                              description=_("Pending print jobs of the other computers running Printer Center "
+                                            "on the network")), False, False, 0)
+
         self.device = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
         self.device_card = card(_("Print jobs on the device"), self.device,
                                 description=_("Jobs from all computers on the network that the device "
@@ -1654,7 +1659,15 @@ class QueuePage(Gtk.ScrolledWindow):
 
         def work():
             result = {"queue": None, "printer": None, "local": [], "history": [], "device": [],
-                     "local_error": None, "device_error": None}
+                     "local_error": None, "device_error": None, "network": [], "peers": 0}
+            try:
+                peers = core.fresh_peers()
+                result["peers"] = len(peers)
+                for d in core.peer_print_jobs(peers):
+                    result["network"] += [dict(j, machine=j.get("machine") or d.get("host") or d["ip"])
+                                          for j in d.get("jobs") or [] if isinstance(j, dict) and "id" in j]
+            except Exception as e:
+                log.debug("Shared print queue: %s", e)
             try:
                 queues = core.local_queues(device)
                 if queues:
@@ -1704,6 +1717,9 @@ class QueuePage(Gtk.ScrolledWindow):
         empty = (_("Could not reach the device: %s") % s["device_error"]) if s["device_error"] \
             else _("No pending jobs on the device.")
         self.populate(self.device, s["device"], [], empty, local=False)
+        empty = (_("No pending print jobs on other computers.") if s["peers"]
+                 else _("No other computer running Printer Center was found on the network."))
+        self.populate(self.network, s["network"], [], empty, local=False, cancel=False)
         self.print_count = len(s["local"]) + len(s["device"])
         self.main_window.set_queue_count(self.print_count + self.scan_count)
 
@@ -1784,8 +1800,9 @@ class QueuePage(Gtk.ScrolledWindow):
         r.add(k)
         return r
 
-    def populate(self, items, active, history, empty_label, local):
-        signature = tuple((i["id"], i["status"], i.get("page")) for i in active + history) + (empty_label,)
+    def populate(self, items, active, history, empty_label, local, cancel=True):
+        signature = tuple((i.get("machine"), i["id"], i["status"], i.get("page"))
+                          for i in active + history) + (empty_label,)
         if getattr(items, "signature", None) == signature:
             return
         items.signature = signature
@@ -1796,7 +1813,7 @@ class QueuePage(Gtk.ScrolledWindow):
             r.add(make_label(empty_label, "pc-dim", margin=12, xalign=0.5))
             items.add(r)
         for i in active:
-            items.add(self.row(i, local, cancel=True))
+            items.add(self.row(i, local, cancel=cancel))
         if history:
             r = Gtk.ListBoxRow(activatable=False)
             r.add(make_label(_("Recently completed"), "pc-dim", margin_top=12, margin_start=8, margin_bottom=4))

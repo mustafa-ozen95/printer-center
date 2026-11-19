@@ -22,7 +22,8 @@ Arayüz Türkçe ve İngilizce; dil sistemden alınır, Ayarlar'dan değiştiril
 - **Queue:** scans and print jobs on one screen. Scans from the app and from the device panel
   wait in line (one at a time; up to 5 minutes while another computer is using the scanner) and can
   be cancelled while waiting. Print jobs: local CUPS jobs and all jobs on the device; cancel,
-  restart a stopped queue.
+  restart a stopped queue. Shared queue: computers running Printer Center on the same network
+  find each other (UDP broadcast) and show each other's pending jobs (read-only `GET /print-jobs`).
 - **Device status:** SNMP error bits and alert table, toner (part no., serial, estimated
   days left), maintenance kit life, trays, counters, security checks. New faults raise a
   desktop notification.
@@ -71,9 +72,13 @@ The installer puts the program in `/opt/printer-center/`, the user service in
 `settings.example.ini`, adds a desktop shortcut, a menu entry and a tray autostart entry.
 A previous `wsd-tarama` installation (and its Turkish-keyed `ayar.ini`) is migrated
 automatically. Scan-to-PC needs the device to reach the computer on TCP `PORT`
-(default 53580); if ufw is active a rule is added.
+(default 53580); if ufw is active a rule is added, plus TCP/UDP `PORT` from the local
+network for the shared queue.
 
-Printing needs no driver: a CUPS IPP Everywhere queue is enough.
+Printing needs no driver: a CUPS IPP Everywhere queue is enough. PDFs that do not embed
+their TrueType fonts (common in reports, e.g. Arial as CID/Identity-H) would print as empty
+tables, because Ghostscript substitutes a font with different glyph numbers; the installer
+adds the Microsoft core fonts and a Ghostscript `cidfmap` entry for them.
 
 ## Updates
 

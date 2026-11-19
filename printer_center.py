@@ -62,7 +62,7 @@ STATE_PATH = os.path.expanduser("~/.cache/printer-center/state.json")
 LOG_DIR = os.path.expanduser("~/.local/state/printer-center")
 
 # Version: bump this when releasing and push a vX.Y.Z tag with the same name (updater.py compares the two)
-VERSION = "2.4.2"
+VERSION = "2.5.0"
 UPDATE_STATE_PATH = "/var/lib/printer-center/update.json"
 UPDATE_SERVICE = "printer-center-update.service"
 INSTALL_SERVICE = "printer-center-install.service"
@@ -1158,6 +1158,18 @@ def handler_class(scanner):
         def log_message(self, file_format, *args):
             log.debug("HTTP %s - %s", self.client_address[0], file_format % args)
 
+        def do_GET(self):
+            # Read-only view of this computer's print queue for Printer Center on other computers
+            if self.path.split("?")[0] != "/print-jobs":
+                self.send_error(404)
+                return
+            body = json.dumps(print_snapshot(scanner.settings.device), ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def do_POST(self):
             length = int(self.headers.get("Content-Length") or 0)
             raw = self.rfile.read(min(length, 1 << 20))
@@ -1245,6 +1257,7 @@ def run_service(settings_path):
     signal.signal(signal.SIGINT, on_signal)
     threading.Thread(target=monitor_device, args=(settings, scanner.notify, shutdown), daemon=True).start()
     threading.Thread(target=watch_updates, args=(scanner.notify, shutdown), daemon=True).start()
+    threading.Thread(target=discover_peers, args=(settings.port, shutdown), daemon=True).start()
     while not shutdown.is_set():
         subscription.stop.clear()
         subscription.loop()
@@ -1506,6 +1519,107 @@ def local_cancel(queue, job_id=None):
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
     if r.returncode != 0:
         raise IppError((r.stderr or r.stdout).strip() or _("cancel failed"))
+
+
+# --------------------------------------------------------------------------
+# Shared print queue: every computer publishes its CUPS queue (GET /print-jobs on the
+# service port) and finds the others with a UDP broadcast on the same port number.
+# --------------------------------------------------------------------------
+
+PEER_MAGIC = "printer-center/1"
+PEER_ANNOUNCE_EVERY = 60
+PEER_TTL = 200  # a computer that has not announced itself for this long is dropped
+_snapshot_cache = {"at": 0, "data": None}
+
+
+def print_snapshot(device_url):
+    """This computer's print queue: pending jobs and a few recently completed ones."""
+    if time.time() - _snapshot_cache["at"] < 2 and _snapshot_cache["data"]:
+        return _snapshot_cache["data"]
+    host = socket.gethostname()
+    data = {"host": host, "version": VERSION, "jobs": [], "history": [], "error": None}
+    try:
+        queues = local_queues(device_url)
+        if queues:
+            uri = queues[0][1]
+            data["jobs"] = ipp_jobs(uri, "not-completed")
+            data["history"] = ipp_jobs(uri, "completed", limit=5)
+            for j in data["jobs"] + data["history"]:
+                j["machine"] = j.get("machine") or host
+    except Exception as e:
+        data["error"] = str(e)
+    _snapshot_cache.update(at=time.time(), data=data)
+    return data
+
+
+def discover_peers(port, shutdown):
+    """Announce this computer and record the others in the state file ("peers")."""
+    host = socket.gethostname()
+    message = ("%s %d %s" % (PEER_MAGIC, port, host)).encode("utf-8")
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    try:
+        s.bind(("", port))
+    except OSError as e:
+        log.warning("Shared print queue disabled (udp/%d: %s)", port, e)
+        return
+    s.settimeout(5)
+    peers, last_announce, saved = {}, 0, None
+    while not shutdown.is_set():
+        now = time.time()
+        if now - last_announce >= PEER_ANNOUNCE_EVERY:
+            last_announce = now
+            with contextlib.suppress(OSError):
+                s.sendto(message, ("<broadcast>", port))
+        try:
+            raw, (ip, _port) = s.recvfrom(512)
+            parts = raw.decode("utf-8", "replace").split(" ", 2)
+            if len(parts) == 3 and parts[0] == PEER_MAGIC and parts[2] != host and parts[1].isdigit():
+                if ip not in peers:
+                    log.info("Found Printer Center on %s (%s)", parts[2], ip)
+                    with contextlib.suppress(OSError):
+                        s.sendto(message, (ip, port))  # answer so that a new computer learns us at once
+                peers[ip] = {"host": parts[2], "port": int(parts[1]), "seen": time.time()}
+        except socket.timeout:
+            pass
+        except OSError:
+            shutdown.wait(5)
+        now = time.time()
+        peers = {ip: p for ip, p in peers.items() if now - p["seen"] < PEER_TTL}
+        current = sorted((ip, p["host"], p["port"]) for ip, p in peers.items())
+        if current != saved or now - (read_state().get("peers_at") or 0) > 60:
+            saved = current
+            write_state(peers={ip: dict(p) for ip, p in peers.items()}, peers_at=now)
+    s.close()
+
+
+def peer_print_jobs(peers, timeout=3):
+    """Ask the other computers for their print queues: [snapshot with "ip"], unreachable ones skipped."""
+    results = []
+
+    def fetch(ip, p):
+        try:
+            with urllib.request.urlopen("http://%s:%d/print-jobs" % (ip, p["port"]), timeout=timeout) as y:
+                d = json.loads(y.read(1 << 20).decode("utf-8"))
+            d["ip"] = ip
+            results.append(d)
+        except (OSError, ValueError) as e:
+            log.debug("Print queue of %s could not be read: %s", ip, e)
+
+    threads = [threading.Thread(target=fetch, args=(ip, p), daemon=True) for ip, p in peers.items()]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout + 1)
+    return sorted(results, key=lambda d: d.get("host") or "")
+
+
+def fresh_peers():
+    d = read_state()
+    now = time.time()
+    return {ip: p for ip, p in (d.get("peers") or {}).items()
+            if isinstance(p, dict) and now - (p.get("seen") or 0) < PEER_TTL and p.get("port")}
 
 
 def main():
