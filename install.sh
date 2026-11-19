@@ -114,7 +114,7 @@ fix_pdf_fonts() {
 # Shared print queue: computers on the local network read each other's queue on the
 # service port (tcp) and find each other with a broadcast on the same port (udp)
 allow_lan_queue() {
-	command -v ufw >/dev/null && ufw status | grep -q "Status: active" || return 0
+	command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q "Status: active" || return 0
 	port=$(sed -n 's/^port *= *\([0-9][0-9]*\).*/\1/p' /home/*/.config/printer-center/settings.ini 2>/dev/null | head -1)
 	port=${port:-$PORT}
 	dev=$(ip -4 route show default 2>/dev/null | awk '{for (i = 1; i < NF; i++) if ($i == "dev") {print $(i + 1); exit}}')
@@ -184,8 +184,8 @@ if [ -n "$UNINSTALL" ]; then
 	fi
 	command -v ufw >/dev/null && ufw delete allow proto tcp from "$PRINTER" to any port "$PORT" >/dev/null 2>&1 || true
 	if command -v ufw >/dev/null; then
-		ufw status numbered 2>/dev/null | grep -q "printer-center \(queue\|discovery\)" &&
-			for n in $(ufw status numbered | grep "printer-center \(queue\|discovery\)" | sed 's/^\[ *\([0-9]*\)\].*/\1/' | sort -rn); do
+		LC_ALL=C ufw status numbered 2>/dev/null | grep -q "printer-center \(queue\|discovery\)" &&
+			for n in $(LC_ALL=C ufw status numbered | grep "printer-center \(queue\|discovery\)" | sed 's/^\[ *\([0-9]*\)\].*/\1/' | sort -rn); do
 				ufw --force delete "$n" >/dev/null
 			done
 	fi
@@ -209,7 +209,7 @@ runuser -u "$USER_NAME" -- mkdir -p "$(dirname "$WANTS")"
 ln -sf /etc/systemd/user/printer-center.service "$WANTS"
 chown -h "$USER_NAME": "$WANTS"
 
-if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
+if command -v ufw >/dev/null && LC_ALL=C ufw status | grep -q "Status: active"; then
 	ufw allow proto tcp from "$PRINTER" to any port "$PORT" comment "printer-center" >/dev/null
 	echo "ufw: $PRINTER -> tcp/$PORT allowed"
 fi
