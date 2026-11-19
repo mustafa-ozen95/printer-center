@@ -1603,52 +1603,38 @@ PRINTER_STATES = {3: (N_("Idle"), "ok"), 4: (N_("Printing"), "ok"), 5: (N_("Stop
 
 
 class QueuePage(Gtk.ScrolledWindow):
+    """One queue for everything: scans waiting for the device, the print jobs the device
+    reports (from every computer on the network) and its recently completed jobs."""
+
     def __init__(self, main_window):
         super().__init__(hscrollbar_policy=Gtk.PolicyType.NEVER)
         self.main_window = main_window
-        self.queue = None  # (name, cups_uri)
+        self.queue = None  # this computer's CUPS queue (name, cups_uri)
         self._running = False
+        self._print = None  # last result of the background refresh
+        self._scans = ([], [])  # (waiting scans, recently completed scans)
+        self._seen = {}  # device job id -> wall-clock time it was first seen (pending / completed)
+        self.scan_count = self.print_count = 0
         inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16, margin=16)
 
-        # Scan queue: this window's scan + scans requested from the device panel (service)
-        self.scans = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
-        self.scan_count = 0
-        inner.pack_start(card(_("Scan queue"), self.scans,
-                              description=_("Scans waiting for the device, from this computer and from "
-                                            "the device panel; one is scanned at a time")), False, False, 0)
-
-        # Local queue status
-        self.queue_badge = styled(Gtk.Label(label="…"), "pc-badge", "neutral")
+        self.state_badge = styled(Gtk.Label(label="…"), "pc-badge", "neutral")
         self.start_btn = icon_button("media-playback-start-symbolic", _("Start queue"))
         self.start_btn.connect("clicked", self.start_queue)
         self.start_btn.set_no_show_all(True)
-        self.cancel_all_btn = icon_button("edit-clear-all-symbolic", _("Cancel all"), "flat")
-        self.cancel_all_btn.connect("clicked", self.cancel_all)
         right = Gtk.Box(spacing=8)
-        for p in (self.queue_badge, self.start_btn, self.cancel_all_btn):
+        for p in (self.state_badge, self.start_btn):
             right.pack_start(p, False, False, 0)
-        self.local = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
-        self.local_card = card("%s (%s)" % (_("Print jobs from this computer"), socket.gethostname()), self.local,
-                               description=_("Pending and recently completed print jobs"), right=right)
-        inner.pack_start(self.local_card, False, False, 0)
-
-        self.network = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
-        inner.pack_start(card(_("Print jobs from other computers"), self.network,
-                              description=_("Pending print jobs of the other computers running Printer Center "
-                                            "on the network")), False, False, 0)
-
-        self.device = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
-        self.device_card = card(_("Print jobs on the device"), self.device,
-                                description=_("Jobs from all computers on the network that the device "
-                                              "is processing now"))
-        inner.pack_start(self.device_card, False, False, 0)
+        self.items = styled(Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE), "pc-job")
+        inner.pack_start(card(_("Queue"), self.items,
+                              description=_("Scans and print jobs on the device, from all computers on "
+                                            "the network"), right=right), False, False, 0)
         self.add(inner)
         self.refresh()
         GLib.timeout_add_seconds(3, self.refresh)
 
     # --- data
     def refresh(self, force=False):
-        self.render_scans()
+        self.read_scans()
         if self._running or not (force or self.get_mapped() or not getattr(self, "_first", False)):
             return True
         self._first = True
@@ -1658,30 +1644,25 @@ class QueuePage(Gtk.ScrolledWindow):
         self._running = True
 
         def work():
-            result = {"queue": None, "printer": None, "local": [], "history": [], "device": [],
-                     "local_error": None, "device_error": None, "network": [], "peers": 0}
-            try:
-                peers = core.fresh_peers()
-                result["peers"] = len(peers)
-                for d in core.peer_print_jobs(peers):
-                    result["network"] += [dict(j, machine=j.get("machine") or d.get("host") or d["ip"])
-                                          for j in d.get("jobs") or [] if isinstance(j, dict) and "id" in j]
-            except Exception as e:
-                log.debug("Shared print queue: %s", e)
+            result = {"queue": None, "local_state": {}, "local": [], "device_state": {},
+                      "device": [], "history": [], "device_error": None}
             try:
                 queues = core.local_queues(device)
                 if queues:
-                    name, uri = queues[0]
-                    result["queue"] = (name, uri)
-                    _status, groups = core.ipp_request(uri, 0x000B, [(0x44, "requested-attributes", [
+                    result["queue"] = queues[0]
+                    _status, groups = core.ipp_request(queues[0][1], 0x000B, [(0x44, "requested-attributes", [
                         "printer-state", "printer-state-message", "printer-is-accepting-jobs"])])
-                    result["printer"] = next((g for g in groups if g.get("_group") == 4), {})
-                    result["local"] = core.ipp_jobs(uri, "not-completed")
-                    result["history"] = core.ipp_jobs(uri, "completed", limit=10)
+                    result["local_state"] = next((g for g in groups if g.get("_group") == 4), {})
+                    result["local"] = core.ipp_jobs(queues[0][1], "not-completed")
             except Exception as e:
-                result["local_error"] = error_text(e)
+                log.debug("Local print queue: %s", e)
             try:
-                result["device"] = core.ipp_jobs(core.device_ipp_uri(device), "not-completed")
+                uri = core.device_ipp_uri(device)
+                _status, groups = core.ipp_request(uri, 0x000B, [(0x44, "requested-attributes", [
+                    "printer-state", "printer-state-message"])])
+                result["device_state"] = next((g for g in groups if g.get("_group") == 4), {})
+                result["device"] = core.ipp_jobs(uri, "not-completed")
+                result["history"] = core.ipp_jobs(uri, "completed", limit=10)
             except Exception as e:
                 result["device_error"] = error_text(e)
             GLib.idle_add(self.render, result)
@@ -1691,68 +1672,84 @@ class QueuePage(Gtk.ScrolledWindow):
 
     def render(self, s):
         self._running = False
+        self._print = s
         self.queue = s["queue"]
-        y = s["printer"] or {}
-        level = "warning"
-        if not self.queue:
-            self.queue_badge.set_text(_("No queue"))
-            swap_class(self.queue_badge, ("ok", "warning", "error", "neutral"), "warning")
+        if s["device_error"]:
+            label_text, level = N_("Unreachable"), "error"
         else:
-            label_text, level = PRINTER_STATES.get(y.get("printer-state"), (N_("Unknown"), "neutral"))
-            if y.get("printer-is-accepting-jobs") is False:
-                label_text, level = N_("Not accepting jobs"), "error"
-            self.queue_badge.set_text(_(label_text))
-            self.queue_badge.set_tooltip_text("%s\n%s" % (self.queue[0], y.get("printer-state-message") or ""))
-            swap_class(self.queue_badge, ("ok", "warning", "error", "neutral"), level)
-        self.start_btn.set_visible(bool(self.queue) and level == "error")
-        self.cancel_all_btn.set_sensitive(bool(s["local"]))
+            label_text, level = PRINTER_STATES.get(s["device_state"].get("printer-state"), (N_("Unknown"), "neutral"))
+        self.state_badge.set_text(_(label_text))
+        self.state_badge.set_tooltip_text(s["device_state"].get("printer-state-message") or s["device_error"] or "")
+        swap_class(self.state_badge, ("ok", "warning", "error", "neutral"), level)
+        y = s["local_state"]
+        stopped = bool(self.queue) and (y.get("printer-state") == 5 or y.get("printer-is-accepting-jobs") is False)
+        self.start_btn.set_visible(stopped)
+        if stopped:
+            self.start_btn.set_tooltip_text(_("This computer's printer queue is stopped: %s") % self.queue[0])
+        self.rebuild()
 
-        if s["local_error"]:
-            empty = _("Could not read the queue: %s") % s["local_error"]
-        elif not self.queue:
-            empty = _("No printer queue is set up for this device.")
-        else:
-            empty = _("No pending print jobs.")
-        self.populate(self.local, s["local"], s["history"], empty, local=True)
-        empty = (_("Could not reach the device: %s") % s["device_error"]) if s["device_error"] \
-            else _("No pending jobs on the device.")
-        self.populate(self.device, s["device"], [], empty, local=False)
-        empty = (_("No pending print jobs on other computers.") if s["peers"]
-                 else _("No other computer running Printer Center was found on the network."))
-        self.populate(self.network, s["network"], [], empty, local=False, cancel=False)
-        self.print_count = len(s["local"]) + len(s["device"])
-        self.main_window.set_queue_count(self.print_count + self.scan_count)
-
-    # --- scan queue
-    def render_scans(self):
+    def read_scans(self):
         d = core.read_state()
-        jobs = [dict(j) for j in ([self.main_window.scan_page.job] if self.main_window.scan_page.job else [])]
+        jobs = [dict(j, own=True) for j in ([self.main_window.scan_page.job] if self.main_window.scan_page.job else [])]
         if d.get("running", True):  # stale entries of a stopped service are ignored
             jobs += [dict(j, own=False) for j in d.get("scan_queue") or []]
-        recent = (d.get("recent_scans") or [])[:5]
-        signature = (tuple((j.get("target"), j.get("time"), j.get("status")) for j in jobs)
-                     + tuple(r.get("path") for r in recent))
-        if self.scan_count != len(jobs):
-            self.scan_count = len(jobs)
-            self.main_window.set_queue_count(getattr(self, "print_count", 0) + self.scan_count)
-        if getattr(self.scans, "signature", None) == signature:
+        self._scans = (jobs, (d.get("recent_scans") or [])[:5])
+        self.rebuild()
+
+    def stamp(self, job, completed):
+        """Wall-clock time of a device job. The device counts seconds since power-on and the
+        counter stops while it sleeps, so the time it reports is only an estimate: prefer the
+        moment this window saw the job (or saw it completed)."""
+        key = (job["id"], completed)
+        if key not in self._seen and (not completed or (job["id"], False) in self._seen):
+            self._seen[key] = time.time()
+        estimate = job.get("completed") if completed else job.get("time")
+        return self._seen.get(key) or estimate
+
+    def rebuild(self):
+        scans, recent_scans = self._scans
+        s = self._print or {"device": [], "history": [], "local": [], "device_error": None, "queue": None}
+        device = [dict(j, time=self.stamp(j, False), source="device") for j in s["device"]]
+        names = {(j["name"], j["user"]) for j in device}
+        # jobs of this computer that have not reached the device yet (e.g. a stopped queue)
+        local = [dict(j, machine=j.get("machine") or socket.gethostname(), source="local") for j in s["local"]
+                 if (j["name"], j["user"]) not in names]
+        history = [dict(j, completed=self.stamp(j, True), source="device") for j in s["history"]]
+        finished = sorted([("print", j.get("completed") or 0, j) for j in history]
+                          + [("scan", r.get("time") or 0, r) for r in recent_scans],
+                          key=lambda x: x[1], reverse=True)[:10]
+        signature = (tuple((j.get("target"), j.get("time"), j.get("status")) for j in scans)
+                     + tuple((j["source"], j["id"], j["status"], j.get("page")) for j in device + local)
+                     + tuple((kind, int(t)) for kind, t, _j in finished) + (s["device_error"], bool(s["queue"])))
+        if self.scan_count + self.print_count != len(scans) + len(device) + len(local):
+            self.scan_count, self.print_count = len(scans), len(device) + len(local)
+            self.main_window.set_queue_count(self.scan_count + self.print_count)
+        if getattr(self.items, "signature", None) == signature:
             return
-        self.scans.signature = signature
-        for r in self.scans.get_children():
-            self.scans.remove(r)
-        if not jobs:
+        self.items.signature = signature
+        for r in self.items.get_children():
+            self.items.remove(r)
+        for n, j in enumerate(scans, 1):
+            self.items.add(self.scan_row(j, n))
+        for j in device:
+            self.items.add(self.row(j, local=False, cancel=True))
+        for j in local:
+            self.items.add(self.row(j, local=True, cancel=True))
+        if not (scans or device or local):
+            if s["device_error"]:
+                text = _("Could not reach the device: %s") % s["device_error"]
+            else:
+                text = _("Nothing is waiting in the queue.")
             r = Gtk.ListBoxRow(activatable=False)
-            r.add(make_label(_("No scans waiting."), "pc-dim", margin=12, xalign=0.5))
-            self.scans.add(r)
-        for n, j in enumerate(jobs, 1):
-            self.scans.add(self.scan_row(j, n))
-        if recent:
+            r.add(make_label(text, "pc-dim", margin=12, xalign=0.5, wrap=True))
+            self.items.add(r)
+        if finished:
             r = Gtk.ListBoxRow(activatable=False)
             r.add(make_label(_("Recently completed"), "pc-dim", margin_top=12, margin_start=8, margin_bottom=4))
-            self.scans.add(r)
-            for item in recent:
-                self.scans.add(self.recent_scan_row(item))
-        self.scans.show_all()
+            self.items.add(r)
+            for kind, _t, item in finished:
+                self.items.add(self.recent_scan_row(item) if kind == "scan" else self.row(item, False, cancel=False))
+        self.items.show_all()
 
     def scan_row(self, j, position):
         r = Gtk.ListBoxRow(activatable=False)
@@ -1799,28 +1796,6 @@ class QueuePage(Gtk.ScrolledWindow):
             k.pack_start(b, False, False, 0)
         r.add(k)
         return r
-
-    def populate(self, items, active, history, empty_label, local, cancel=True):
-        signature = tuple((i.get("machine"), i["id"], i["status"], i.get("page"))
-                          for i in active + history) + (empty_label,)
-        if getattr(items, "signature", None) == signature:
-            return
-        items.signature = signature
-        for r in items.get_children():
-            items.remove(r)
-        if not active:
-            r = Gtk.ListBoxRow(activatable=False)
-            r.add(make_label(empty_label, "pc-dim", margin=12, xalign=0.5))
-            items.add(r)
-        for i in active:
-            items.add(self.row(i, local, cancel=cancel))
-        if history:
-            r = Gtk.ListBoxRow(activatable=False)
-            r.add(make_label(_("Recently completed"), "pc-dim", margin_top=12, margin_start=8, margin_bottom=4))
-            items.add(r)
-            for i in history:
-                items.add(self.row(i, local, cancel=False))
-        items.show_all()
 
     def row(self, i, local, cancel):
         r = Gtk.ListBoxRow(activatable=False)
@@ -1872,17 +1847,6 @@ class QueuePage(Gtk.ScrolledWindow):
         except Exception as e:
             log.error("Could not cancel job #%s: %s", i["id"], e)
             self.main_window.warn(_("Could not cancel the job:\n%s") % error_text(e))
-        self.refresh(force=True)
-
-    def cancel_all(self, _widget):
-        if not self.queue or not self.main_window.ask(_("Cancel all pending jobs of this computer?")):
-            return
-        try:
-            core.local_cancel(self.queue[0])
-            log.info("All pending local jobs cancelled")
-        except Exception as e:
-            log.error("Cancelling all jobs failed: %s", e)
-            self.main_window.warn(_("Could not cancel:\n%s") % error_text(e))
         self.refresh(force=True)
 
     def start_queue(self, _widget):
